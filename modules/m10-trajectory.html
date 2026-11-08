@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>轨迹持久化 —— traj.json 与 inspector | mini-swe-agent 源码教程</title>
+<script>(function(){var t=localStorage.getItem("theme");
+if(!t){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
+document.documentElement.dataset.theme=t;})();</script>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../pygments.css">
+</head>
+<body>
+<div class="page">
+<aside class="sidebar">
+  <p class="book-title">mini-swe-agent<br>源码教程</p>
+  <p class="book-sub">基于 v2.4.6 · 12 章</p>
+  <nav><a href="../index.html">首页</a>
+<a href="../modules/m01-overview.html"><span class="no">M01</span>概览</a>
+<a href="../modules/m02-package-map.html"><span class="no">M02</span>包地图</a>
+<a href="../modules/m03-agent-loop.html"><span class="no">M03</span>Agent 循环</a>
+<a href="../modules/m04-messages-templates.html"><span class="no">M04</span>消息与模板</a>
+<a href="../modules/m05-model-call.html"><span class="no">M05</span>模型调用</a>
+<a href="../modules/m06-actions.html"><span class="no">M06</span>动作解析</a>
+<a href="../modules/m07-environments.html"><span class="no">M07</span>环境</a>
+<a href="../modules/m08-interactive.html"><span class="no">M08</span>交互模式</a>
+<a href="../modules/m09-config.html"><span class="no">M09</span>配置系统</a>
+<a href="../modules/m10-trajectory.html" class="active"><span class="no">M10</span>轨迹持久化</a>
+<a href="../modules/m11-swebench.html"><span class="no">M11</span>基准测试</a>
+<a href="../modules/m12-extending.html"><span class="no">M12</span>扩展指南</a></nav>
+</aside>
+<div class="main">
+  <div class="topbar"><button class="theme-toggle" onclick="toggleTheme()">切换明暗</button></div>
+  <div class="content">
+<h1>轨迹持久化 —— traj.json 与 inspector</h1>
+<p class="meta">约 13 分钟读完</p><blockquote>
+<p>本章源文件：<code>src/minisweagent/agents/default.py:159-190</code>、<code>run/utilities/inspector.py</code>（316 行）、<code>models/utils/content_string.py</code>（87 行）。</p>
+</blockquote>
+<h2>一、引子：跑完留下的那个文件</h2>
+<p>每次 <code>mini</code> 运行结束（甚至崩溃），磁盘上都会留下一个 <code>*.traj.json</code>。它是调试现场、是评测输入、也是微调数据——m01 说"轨迹和 messages 是同一个东西"，落盘格式就是这个性质的载体。读完你应该能回答三个问题：</p>
+<ol>
+<li>traj.json 的顶层结构是什么？<code>trajectory_format: "mini-swe-agent-1.1"</code> 标记在哪？</li>
+<li>为什么 agent 每步都保存而不是跑完才保存？崩溃时文件里会有什么？</li>
+<li>inspector 怎么把一串消息切成"步"来翻页？快捷键体系是什么？</li>
+</ol>
+<h2>二、先把词对齐</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>术语</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>trajectory</td>
+<td>一次运行的完整记录：消息列表 + 元信息</td>
+</tr>
+<tr>
+<td>exit_status</td>
+<td>死因标签：Submitted / LimitsExceeded / TimeExceeded / RepeatedFormatError / 异常类名</td>
+</tr>
+<tr>
+<td>submission</td>
+<td>任务产出（SWE-bench 场景就是 git patch 文本）</td>
+</tr>
+<tr>
+<td>inspector</td>
+<td><code>mini-extra inspect</code>，textual 写的终端轨迹浏览器</td>
+</tr>
+<tr>
+<td>step（inspector 语义）</td>
+<td>一条助手消息 + 紧随其后的观察消息，作为一页展示</td>
+</tr>
+</tbody>
+</table></div>
+<h2>三、serialize：轨迹的解剖（default.py:159-180）</h2>
+<div class="codehilite"><pre><span></span><code><span class="n">agent_data</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">"info"</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">"model_stats"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"instance_cost"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">cost</span><span class="p">,</span> <span class="s2">"api_calls"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_calls</span><span class="p">},</span>   <span class="c1"># :165-168</span>
+        <span class="s2">"config"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"agent"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">model_dump</span><span class="p">(</span><span class="n">mode</span><span class="o">=</span><span class="s2">"json"</span><span class="p">),</span>
+                   <span class="s2">"agent_type"</span><span class="p">:</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">module</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">class</span><span class="si">}</span><span class="s2">"</span><span class="p">},</span>                            <span class="c1"># :169-172</span>
+        <span class="s2">"mini_version"</span><span class="p">:</span> <span class="n">__version__</span><span class="p">,</span>                                              <span class="c1"># :173</span>
+        <span class="s2">"exit_status"</span><span class="p">:</span> <span class="n">last_extra</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"exit_status"</span><span class="p">,</span> <span class="s2">""</span><span class="p">),</span>                         <span class="c1"># :174</span>
+        <span class="s2">"submission"</span><span class="p">:</span> <span class="n">last_extra</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"submission"</span><span class="p">,</span> <span class="s2">""</span><span class="p">),</span>                           <span class="c1"># :175</span>
+    <span class="p">},</span>
+    <span class="s2">"messages"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">messages</span><span class="p">,</span>                                                    <span class="c1"># :177</span>
+    <span class="s2">"trajectory_format"</span><span class="p">:</span> <span class="s2">"mini-swe-agent-1.1"</span><span class="p">,</span>                                    <span class="c1"># :178</span>
+<span class="p">}</span>
+<span class="k">return</span> <span class="n">recursive_merge</span><span class="p">(</span><span class="n">agent_data</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">serialize</span><span class="p">(),</span> <span class="bp">self</span><span class="o">.</span><span class="n">env</span><span class="o">.</span><span class="n">serialize</span><span class="p">(),</span> <span class="o">*</span><span class="n">extra_dicts</span><span class="p">)</span>  <span class="c1"># :180</span>
+</code></pre></div>
+
+<p>顶层三键：<code>info</code>、<code>messages</code>、<code>trajectory_format</code>。要点：</p>
+<ul>
+<li><strong>exit_status/submission 取自最后一条消息的 extra</strong>（161-162 行）——exit 消息既是循环哨兵又是结果载体，一处两用；</li>
+<li><code>agent_type</code>/<code>model_type</code>/<code>environment_type</code> 都是全限定类名（<code>litellm_model.py:156-164</code>、<code>local.py:61-69</code>）——轨迹自描述，事后知道是哪个实现跑出来的；</li>
+<li>180 行的合并顺序：agent 基底 → 模型元数据 → 环境元数据 → 调用方 extra。m11 的批量跑就是靠最后的 <code>*extra_dicts</code> 塞进 <code>instance_id</code> 和覆写 exit_status；</li>
+<li><code>messages</code> <strong>原样</strong>落盘，含全部 extra（原始响应、未截断输出、成本、时间戳）——m04 的"两个视图"在这里闭合。</li>
+</ul>
+<h2>四、save：每步都落盘（182-190 行）</h2>
+<div class="codehilite"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">save</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">path</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span> <span class="o">*</span><span class="n">extra_dicts</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">serialize</span><span class="p">(</span><span class="o">*</span><span class="n">extra_dicts</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">path</span><span class="p">:</span>
+        <span class="n">path</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">parents</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>   <span class="c1"># :188</span>
+        <span class="n">path</span><span class="o">.</span><span class="n">write_text</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">indent</span><span class="o">=</span><span class="mi">2</span><span class="p">))</span>      <span class="c1"># :189</span>
+    <span class="k">return</span> <span class="n">data</span>
+</code></pre></div>
+
+<p>调用点在 <code>run</code> 的 <strong>finally</strong>（<code>default.py:120-121</code>）：每个 step 之后、无论正常还是异常，都写一次。三个后果：</p>
+<ol>
+<li><strong>崩溃有现场</strong>：未捕获异常 re-raise 前，finally 已把含 traceback 的 exit 消息写进文件（m03 的 74-86 行）；</li>
+<li><strong>可实时围观</strong>：长任务跑着，另一个终端 <code>mini-extra inspect</code> 打开同一个文件，按 <code>R</code> 刷新就能看到最新步（inspector 的 reload，278-285 行）；</li>
+<li><strong>path=None 也工作</strong>：<code>save(None)</code> 只返回 dict 不写盘——Python bindings 里拿结构化结果用。</li>
+</ol>
+<p>代价是每步全量重写 JSON。对几百步的轨迹这是几十毫秒级开销，相比模型调用的秒级延迟可忽略——又是"简单优先"的取舍。</p>
+<h2>五、inspector：终端里的轨迹浏览器</h2>
+<p><code>mini-extra inspect [path]</code>（<code>inspector.py:296-312</code>）：path 是文件就直接看，是目录就 <code>rglob("*.traj.json")</code> 收集全部轨迹排序看（305 行）。textual App，vim 风格键位。</p>
+<h3>5.1 消息怎么切成"步"（_messages_to_steps，25-38 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="k">for</span> <span class="n">message</span> <span class="ow">in</span> <span class="n">messages</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">message</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"extra"</span><span class="p">,</span> <span class="p">{})</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"actions"</span><span class="p">)</span> <span class="ow">or</span> <span class="n">message</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"role"</span><span class="p">)</span> <span class="o">==</span> <span class="s2">"assistant"</span><span class="p">:</span>  <span class="c1"># :31</span>
+        <span class="n">steps</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">current_step</span><span class="p">)</span>
+        <span class="n">current_step</span> <span class="o">=</span> <span class="p">[</span><span class="n">message</span><span class="p">]</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">current_step</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">message</span><span class="p">)</span>
+</code></pre></div>
+
+<p>遇到助手消息（或带 actions 的消息——human 模式的用户命令）就开新页，其余消息（观察、纠错、插话）归入当前页。<strong>一页 = 模型的一次决策 + 其全部后果</strong>，正好是回顾时的自然单位。开头的 system/user 两条消息自成第 0 页。</p>
+<h3>5.2 键位表（81-95 行）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>键</th>
+<th>动作</th>
+<th>键</th>
+<th>动作</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>→/l</code> <code>←/h</code></td>
+<td>下一步 / 上一步</td>
+<td><code>L</code> <code>H</code></td>
+<td>下一条 / 上一条轨迹</td>
+</tr>
+<tr>
+<td><code>0</code> <code>$</code></td>
+<td>首页 / 末页</td>
+<td><code>j/k</code></td>
+<td>滚动</td>
+</tr>
+<tr>
+<td><code>e</code></td>
+<td>当前步扔进 jless 看 JSON</td>
+<td><code>E</code></td>
+<td>整条轨迹扔进 jless</td>
+</tr>
+<tr>
+<td><code>r</code></td>
+<td>显隐 reasoning 内容</td>
+<td><code>R</code></td>
+<td>从磁盘重载（保留步位置）</td>
+</tr>
+<tr>
+<td><code>q</code></td>
+<td>退出</td>
+<td></td>
+<td></td>
+</tr>
+</tbody>
+</table></div>
+<p>索引设置器自动夹取边界并回滚顶部（121-127、139-146 行）——翻到头不会炸。<code>e</code> 键把当前步 dump 成临时 JSON 调 <code>jless</code>（255-272 行），看 extra 里的原始响应最方便。</p>
+<h3>5.3 渲染：复用 get_content_string（195-225 行）</h3>
+<p>每条消息的展示文本来自 <code>get_content_string</code>（m08 提过，<code>content_string.py:32-87</code>）：字符串 content、多模态块、tool_use/tool_result、OpenAI tool_calls、Responses output 都能提取；观察 JSON 还会被美化成键值分段（<code>_format_observation</code>，17-29 行）。assistant 的 <code>reasoning_content</code> 单独分块展示（213-219 行），<code>r</code> 键切换。加载时容忍两种文件形状：纯消息列表或带 <code>messages</code> 键的 dict（164-169 行）——v1 旧轨迹也能看。</p>
+<h2>六、轨迹的三重身份</h2>
+<p>把本章串起来，traj.json 在项目里扮演三个角色：</p>
+<ol>
+<li><strong>调试现场</strong>：崩溃有 traceback、格式错误有原始响应（m05 契约）、每步落盘可围观；</li>
+<li><strong>评测输入</strong>：m11 的批量跑从轨迹取 <code>submission</code> 写进 preds.json，exit_status 汇总成报告；</li>
+<li><strong>训练数据</strong>：线性历史 + 原生消息格式，意味着轨迹可直接用于微调/RL——README 把这列为设计目标（<code>README.md:45-47</code>、<code>:91</code>）。</li>
+</ol>
+<p>一个格式服务三种用途，靠的是"不加工"这个纪律。</p>
+<h2>七、小结</h2>
+<ul>
+<li>轨迹三键：info（成本/配置/版本/死因/产出）、messages（全量含 extra）、trajectory_format 标记。</li>
+<li>save 在 run 的 finally 里每步执行：崩溃有现场、可实时围观、None 路径纯返回。</li>
+<li>inspector 按"助手消息开新页"切步，vim 键位 + jless 集成 + reasoning 开关 + 热重载。</li>
+<li>消息文本提取 <code>get_content_string</code> 一处实现，CLI 打印与 inspector 两处复用。</li>
+<li>下一章看轨迹的最大消费者：SWE-bench 批量评测的工程细节。</li>
+</ul>
+<div class="pager"><a href="m09-config.html"><span class="dir">← 上一章</span>配置系统 —— YAML、UNSET 与递归合并</a><a class="next" href="m11-swebench.html"><span class="dir">下一章 →</span>基准测试 —— 批量跑 SWE-bench 的工程细节</a></div>
+  </div>
+</div>
+</div>
+<script>function toggleTheme(){var h=document.documentElement;
+var t=h.dataset.theme==="dark"?"light":"dark";h.dataset.theme=t;localStorage.setItem("theme",t);}</script>
+</body>
+</html>

@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>交互模式 —— human/confirm/yolo 三态 | mini-swe-agent 源码教程</title>
+<script>(function(){var t=localStorage.getItem("theme");
+if(!t){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
+document.documentElement.dataset.theme=t;})();</script>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../pygments.css">
+</head>
+<body>
+<div class="page">
+<aside class="sidebar">
+  <p class="book-title">mini-swe-agent<br>源码教程</p>
+  <p class="book-sub">基于 v2.4.6 · 12 章</p>
+  <nav><a href="../index.html">首页</a>
+<a href="../modules/m01-overview.html"><span class="no">M01</span>概览</a>
+<a href="../modules/m02-package-map.html"><span class="no">M02</span>包地图</a>
+<a href="../modules/m03-agent-loop.html"><span class="no">M03</span>Agent 循环</a>
+<a href="../modules/m04-messages-templates.html"><span class="no">M04</span>消息与模板</a>
+<a href="../modules/m05-model-call.html"><span class="no">M05</span>模型调用</a>
+<a href="../modules/m06-actions.html"><span class="no">M06</span>动作解析</a>
+<a href="../modules/m07-environments.html"><span class="no">M07</span>环境</a>
+<a href="../modules/m08-interactive.html" class="active"><span class="no">M08</span>交互模式</a>
+<a href="../modules/m09-config.html"><span class="no">M09</span>配置系统</a>
+<a href="../modules/m10-trajectory.html"><span class="no">M10</span>轨迹持久化</a>
+<a href="../modules/m11-swebench.html"><span class="no">M11</span>基准测试</a>
+<a href="../modules/m12-extending.html"><span class="no">M12</span>扩展指南</a></nav>
+</aside>
+<div class="main">
+  <div class="topbar"><button class="theme-toggle" onclick="toggleTheme()">切换明暗</button></div>
+  <div class="content">
+<h1>交互模式 —— human/confirm/yolo 三态</h1>
+<p class="meta">约 18 分钟读完</p><blockquote>
+<p>本章源文件：<code>src/minisweagent/agents/interactive.py</code>（209 行）、<code>agents/utils/prompt_user.py</code>（20 行）。</p>
+</blockquote>
+<h2>一、引子：把方向盘交给人</h2>
+<p><code>DefaultAgent</code> 一旦开跑就不问人。<code>InteractiveAgent</code>（<code>mini</code> CLI 的默认 agent）在循环的四个关键位置开了口子：执行前确认、Ctrl-C 插话、提交前把关、限额时提额。它只比父类多 19 行，却是日常使用最常打交道的类。读完你应该能回答三个问题：</p>
+<ol>
+<li>human / confirm / yolo 三种模式各拦什么、放什么？运行中怎么切换？</li>
+<li>Ctrl-C 之后 agent 为什么没有死，用户的话是怎么进入对话的？</li>
+<li>限额触发时，什么情况下问用户提额，什么情况下直接停？</li>
+</ol>
+<h2>二、先把词对齐</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>术语</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>confirm（默认）</td>
+<td>模型发的命令，非白名单者需用户回车确认</td>
+</tr>
+<tr>
+<td>yolo</td>
+<td>模型的命令直接执行，不问</td>
+</tr>
+<tr>
+<td>human</td>
+<td>不问模型，用户手输命令直接执行</td>
+</tr>
+<tr>
+<td>白名单</td>
+<td><code>whitelist_actions</code> 正则列表，匹配者免确认</td>
+</tr>
+<tr>
+<td>斜杠命令</td>
+<td><code>/y /c /u /h /m</code>，任何提示处可用的模式/帮助指令</td>
+</tr>
+<tr>
+<td>UserInterruption</td>
+<td>携带用户消息的控制流异常，追加后循环继续</td>
+</tr>
+</tbody>
+</table></div>
+<h2>三、全景：四个覆写，四个口子</h2>
+<p><code>InteractiveAgent</code> 继承 <code>DefaultAgent</code>，只覆写四个方法（外加一堆私有辅助）：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>覆写</th>
+<th>行号</th>
+<th>开口位置</th>
+<th>干什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>add_messages</code></td>
+<td>43-56</td>
+<td>每条消息入列时</td>
+<td>顺带打印到终端</td>
+</tr>
+<tr>
+<td><code>query</code></td>
+<td>58-94</td>
+<td>问模型之前</td>
+<td>human 模式改问用户；限额时提额</td>
+</tr>
+<tr>
+<td><code>step</code></td>
+<td>109-122</td>
+<td>包住整个 step</td>
+<td>捕获 KeyboardInterrupt，转为插话</td>
+</tr>
+<tr>
+<td><code>execute_actions</code></td>
+<td>124-139</td>
+<td>执行命令之前</td>
+<td>确认/拒绝；提交前问是否接新任务</td>
+</tr>
+</tbody>
+</table></div>
+<p>配置类 <code>InteractiveAgentConfig</code>（24-30 行）在父类基础上加三字段：<code>mode</code>（默认 <code>"confirm"</code>）、<code>whitelist_actions</code>（默认空）、<code>confirm_exit</code>（默认 <code>True</code>）。</p>
+<h2>四、query：human 模式与限额提额（58-94 行）</h2>
+<h3>4.1 human 模式：伪造一条"模型消息"（60-71 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">mode</span> <span class="o">==</span> <span class="s2">"human"</span><span class="p">:</span>
+    <span class="k">match</span> <span class="n">command</span> <span class="o">:=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_prompt_and_handle_slash_commands</span><span class="p">(</span><span class="o">...</span><span class="p">):</span>
+        <span class="k">case</span> <span class="s2">"/y"</span> <span class="o">|</span> <span class="s2">"/c"</span><span class="p">:</span>
+            <span class="k">pass</span>                                   <span class="c1"># 切模式后落回正常 query</span>
+        <span class="k">case</span><span class="w"> </span><span class="k">_</span><span class="p">:</span>
+            <span class="n">msg</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"role"</span><span class="p">:</span> <span class="s2">"user"</span><span class="p">,</span>
+                   <span class="s2">"content"</span><span class="p">:</span> <span class="sa">f</span><span class="s2">"User command: </span><span class="se">\n</span><span class="s2">```bash</span><span class="se">\n</span><span class="si">{</span><span class="n">command</span><span class="si">}</span><span class="se">\n</span><span class="s2">```"</span><span class="p">,</span>
+                   <span class="s2">"extra"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"actions"</span><span class="p">:</span> <span class="p">[{</span><span class="s2">"command"</span><span class="p">:</span> <span class="n">command</span><span class="p">}]}}</span>   <span class="c1"># :65-69</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">add_messages</span><span class="p">(</span><span class="n">msg</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">msg</span>
+</code></pre></div>
+
+<p>精妙之处：用户手输的命令被包装成<strong>带 <code>extra.actions</code> 的 user 消息</strong>，直接当作 query 的返回值。下游 <code>execute_actions</code> 只认 <code>extra.actions</code>（<code>default.py:156</code>），根本不关心这条消息来自模型还是人——<strong>协议的一致性让"人接管模型"只需要伪造一个数据结构</strong>。观察消息也因此走 <code>role="user"</code> 分支（<code>actions_toolcall.py:109</code>，无 tool_call_id），格式天然正确。</p>
+<h3>4.2 限额提额与它的两个例外（72-94 行）</h3>
+<p>正常模式包一层 <code>console.status</code> 转圈等模型（73-74 行）。两个 except 是本章最见设计功力的地方：</p>
+<div class="codehilite"><pre><span></span><code><span class="k">except</span> <span class="n">TimeExceeded</span><span class="p">:</span>
+    <span class="c1"># A wall-clock limit can't be lifted by raising the step/cost limits ...</span>
+    <span class="k">raise</span>                                          <span class="c1"># :75-79</span>
+<span class="k">except</span> <span class="n">LimitsExceeded</span><span class="p">:</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_stdin_is_interactive</span><span class="p">():</span>
+        <span class="k">raise</span>                                      <span class="c1"># :81-87</span>
+    <span class="o">...</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">step_limit</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="nb">input</span><span class="p">(</span><span class="s2">"New step limit: "</span><span class="p">))</span>    <span class="c1"># :92</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">cost_limit</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="nb">input</span><span class="p">(</span><span class="s2">"New cost limit: "</span><span class="p">))</span>  <span class="c1"># :93</span>
+    <span class="k">return</span> <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="n">query</span><span class="p">()</span>                         <span class="c1"># :94  用新限额重查</span>
+</code></pre></div>
+
+<ul>
+<li><strong>TimeExceeded 直接放行</strong>（75-79 行）：注释解释——墙钟超限不是提额能救的，重查会再次撞钟，问用户只会无限循环。所以干净地停。</li>
+<li><strong>LimitsExceeded 先查有没有终端</strong>（81-87 行）：<code>_stdin_is_interactive</code>（96-107 行）判断 <code>sys.stdin.isatty()</code>。CI 里 <code>--yolo</code> 无人值守、stdin 重定向自 <code>/dev/null</code> 时，<code>input()</code> 会抛 EOFError 把运行搞崩——不如直接停，轨迹里留下 LimitsExceeded 死因。</li>
+<li>有终端才问新限额，然后<strong>递归重查</strong>（94 行）：新限额生效，这次调用不算浪费。</li>
+</ul>
+<h2>五、step：Ctrl-C 不是终止，是插话（109-122 行）</h2>
+<div class="codehilite"><pre><span></span><code><span class="k">try</span><span class="p">:</span>
+    <span class="n">console</span><span class="o">.</span><span class="n">print</span><span class="p">(</span><span class="n">Rule</span><span class="p">())</span>                          <span class="c1"># :112  终端分隔线</span>
+    <span class="k">return</span> <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="n">step</span><span class="p">()</span>
+<span class="k">except</span> <span class="ne">KeyboardInterrupt</span><span class="p">:</span>
+    <span class="n">interruption_message</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_prompt_and_handle_slash_commands</span><span class="p">(</span>
+        <span class="s2">"Interrupted. Type a comment/command (/h for available commands) &gt; "</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>  <span class="c1"># :115-119</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">interruption_message</span> <span class="ow">or</span> <span class="n">interruption_message</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_MODE_COMMANDS_MAPPING</span><span class="p">:</span>
+        <span class="n">interruption_message</span> <span class="o">=</span> <span class="s2">"Temporary interruption caught."</span>              <span class="c1"># :120-121</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_interrupt</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Interrupted by user: </span><span class="si">{</span><span class="n">interruption_message</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>          <span class="c1"># :122</span>
+</code></pre></div>
+
+<p>Ctrl-C 落在 step 任何深处（模型调用中、命令执行中）都会飞到这里。用户输入一句评论，<code>_interrupt</code>（40-41 行）抛 <code>UserInterruption</code>，携带 <code>role="user"</code> 的消息；<code>run</code> 的 except 分支追加后循环继续——<strong>模型下一轮就能读到你的话</strong>。输入为空或只是切模式，则补一句 "Temporary interruption caught." 让模型知道被打断过但没什么要说的。</p>
+<p>这就是"steering"的极简实现：没有专门的消息通道、没有队列，复用异常控制流 + 线性历史。</p>
+<h2>六、execute_actions：确认、拒绝与提交把关（124-139 行）</h2>
+<div class="codehilite"><pre><span></span><code><span class="k">try</span><span class="p">:</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_ask_confirmation_or_interrupt</span><span class="p">(</span><span class="n">commands</span><span class="p">)</span>    <span class="c1"># :130</span>
+    <span class="k">for</span> <span class="n">action</span> <span class="ow">in</span> <span class="n">actions</span><span class="p">:</span>
+        <span class="n">outputs</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">env</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">action</span><span class="p">))</span>   <span class="c1"># :131-132</span>
+<span class="k">except</span> <span class="n">Submitted</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_check_for_new_task_or_submit</span><span class="p">(</span><span class="n">e</span><span class="p">)</span>          <span class="c1"># :133-134</span>
+<span class="k">finally</span><span class="p">:</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">add_messages</span><span class="p">(</span><span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">format_observation_messages</span><span class="p">(</span><span class="n">message</span><span class="p">,</span> <span class="n">outputs</span><span class="p">,</span> <span class="o">...</span><span class="p">))</span>  <span class="c1"># :135-138</span>
+</code></pre></div>
+
+<p><strong>try/finally 保住部分输出</strong>：假设 3 个动作，第 2 个触发 Submitted——<code>outputs</code> 里已有前 2 个的结果，finally 保证它们进轨迹（没执行的由 m06 的 padding 补齐）。用户中途拒绝同理：已执行的部分不丢。</p>
+<h3>6.1 确认逻辑（162-182 行）</h3>
+<p><code>_should_ask_confirmation</code>（162-163 行）：<code>mode == "confirm"</code> 且不匹配任何白名单正则。注意是 <code>re.match</code>（前缀匹配）且<strong>任一命令需要确认就整批问</strong>（166 行）。</p>
+<p>提示处的三种回答（173-182 行）：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>输入</th>
+<th>效果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>回车 / <code>/y</code></td>
+<td>确认执行（<code>/y</code> 同时永久切到 yolo）</td>
+</tr>
+<tr>
+<td><code>/u</code></td>
+<td>拒绝执行 + 切 human 模式（<code>UserRejection</code> 插话）</td>
+</tr>
+<tr>
+<td>其他文本</td>
+<td>拒绝执行，文本作为拒绝理由插话给模型</td>
+</tr>
+</tbody>
+</table></div>
+<p>拒绝不是报错，是<strong>对话</strong>：模型下一轮读到 "The user rejected your commands with the following message: ..."（180 行），可以改方案。</p>
+<h3>6.2 提交把关（144-160 行）</h3>
+<p>模型发出哨兵命令后，<code>confirm_exit=True</code> 时先问用户（147-153 行）："Agent wants to finish. Type new task or Enter to quit"。</p>
+<ul>
+<li>回车 → 放行 <code>Submitted</code>，任务真结束；</li>
+<li>输入新任务 → 抛 <code>UserInterruption</code>（<code>itype="UserNewTask"</code>，159 行），<strong>循环继续，模型带着新任务接着干</strong>；</li>
+<li><code>/u</code> → 切 human 模式继续（154-155 行）；</li>
+<li><code>/y</code> <code>/c</code> → 切完模式再问一遍（156-157 行递归）。</li>
+</ul>
+<p><code>mini -y</code>（yolo）搭配 <code>--exit-immediately</code> 会把 <code>confirm_exit</code> 关掉（<code>mini.py:81</code>），无人值守跑批就靠这个组合。</p>
+<h2>七、斜杠命令与输入会话（184-209 行）</h2>
+<p>所有提示都过 <code>_prompt_and_handle_slash_commands</code>，统一处理五个斜杠命令：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>命令</th>
+<th>作用</th>
+<th>实现</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/y</code> <code>/c</code> <code>/u</code></td>
+<td>切 yolo / confirm / human</td>
+<td>查 <code>_MODE_COMMANDS_MAPPING</code>（34 行），改 <code>config.mode</code></td>
+</tr>
+<tr>
+<td><code>/h</code></td>
+<td>打印当前模式与命令帮助，然后重新提示</td>
+<td>192-200 行</td>
+</tr>
+<tr>
+<td><code>/m</code></td>
+<td>转入多行输入</td>
+<td>190-191 行递归调 <code>_multiline_prompt</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>两个小机关：已在目标模式时提示 "Already in ... mode" 并重新问（202-205 行）；切模式成功返回斜杠命令本身，让调用方（如确认逻辑）知道刚切了模式。</p>
+<p>输入会话在 <code>prompt_user.py</code>：全局共享一个 <code>FileHistory</code>（7 行），历史落盘在全局配置目录的 <code>interactive_history.txt</code>——<strong>跨运行记住你输过的命令</strong>，方向键翻历史、Ctrl-R 搜索（12-20 行的多行提示工具栏有写）。</p>
+<h2>八、打印：add_messages 的顺差（43-56 行）</h2>
+<p>每条消息入列时打印：assistant 消息带步数与累计成本横幅（48-52 行），其他 role 绿字标题。内容提取靠 <code>get_content_string</code>（<code>models/utils/content_string.py:32-87</code>）——它要兼容字符串 content、多模态块、Anthropic tool_use、OpenAI tool_calls、Responses API output 等七种形状（37-43 行 docstring），m10 的 inspector 也复用它。<strong>一处提取，两处展示</strong>。</p>
+<h2>九、小结</h2>
+<ul>
+<li>四个覆写开四个口子：打印（add_messages）、human/提额（query）、Ctrl-C 插话（step）、确认/提交把关（execute_actions）。</li>
+<li>human 模式的本质：伪造带 <code>extra.actions</code> 的 user 消息，下游协议无感。</li>
+<li>Ctrl-C → UserInterruption → 追加 user 消息 → 循环继续；拒绝执行也是对话而非报错。</li>
+<li>提额的两个例外都写了注释：墙钟不可提额、无终端不可提问——无人值守场景必须干净地停。</li>
+<li>try/finally + 观察 padding：任何中断下已执行部分的输出都不丢。</li>
+<li>下一章退后一步，看这一切的配置从哪里来：YAML、UNSET 与三个工厂。</li>
+</ul>
+<div class="pager"><a href="m07-environments.html"><span class="dir">← 上一章</span>环境 —— 子壳、哨兵与进程组</a><a class="next" href="m09-config.html"><span class="dir">下一章 →</span>配置系统 —— YAML、UNSET 与递归合并</a></div>
+  </div>
+</div>
+</div>
+<script>function toggleTheme(){var h=document.documentElement;
+var t=h.dataset.theme==="dark"?"light":"dark";h.dataset.theme=t;localStorage.setItem("theme",t);}</script>
+</body>
+</html>

@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>包地图 —— 五个目录，三个协议 | mini-swe-agent 源码教程</title>
+<script>(function(){var t=localStorage.getItem("theme");
+if(!t){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
+document.documentElement.dataset.theme=t;})();</script>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../pygments.css">
+</head>
+<body>
+<div class="page">
+<aside class="sidebar">
+  <p class="book-title">mini-swe-agent<br>源码教程</p>
+  <p class="book-sub">基于 v2.4.6 · 12 章</p>
+  <nav><a href="../index.html">首页</a>
+<a href="../modules/m01-overview.html"><span class="no">M01</span>概览</a>
+<a href="../modules/m02-package-map.html" class="active"><span class="no">M02</span>包地图</a>
+<a href="../modules/m03-agent-loop.html"><span class="no">M03</span>Agent 循环</a>
+<a href="../modules/m04-messages-templates.html"><span class="no">M04</span>消息与模板</a>
+<a href="../modules/m05-model-call.html"><span class="no">M05</span>模型调用</a>
+<a href="../modules/m06-actions.html"><span class="no">M06</span>动作解析</a>
+<a href="../modules/m07-environments.html"><span class="no">M07</span>环境</a>
+<a href="../modules/m08-interactive.html"><span class="no">M08</span>交互模式</a>
+<a href="../modules/m09-config.html"><span class="no">M09</span>配置系统</a>
+<a href="../modules/m10-trajectory.html"><span class="no">M10</span>轨迹持久化</a>
+<a href="../modules/m11-swebench.html"><span class="no">M11</span>基准测试</a>
+<a href="../modules/m12-extending.html"><span class="no">M12</span>扩展指南</a></nav>
+</aside>
+<div class="main">
+  <div class="topbar"><button class="theme-toggle" onclick="toggleTheme()">切换明暗</button></div>
+  <div class="content">
+<h1>包地图 —— 五个目录，三个协议</h1>
+<p class="meta">约 21 分钟读完</p><blockquote>
+<p>本章源文件：<code>src/minisweagent/__init__.py</code>、<code>pyproject.toml</code>、三个组件目录的 <code>__init__.py</code>。</p>
+</blockquote>
+<h2>一、引子：import 的那一刻发生了什么</h2>
+<p>你在 Python 里写下 <code>from minisweagent.agents.default import DefaultAgent</code>，在进程里实际发生的事比你想象的多：打印横幅、创建全局配置目录、加载 <code>.env</code> 文件、注册日志器。这一章把「这个包由什么构成、入口在哪、组件之间靠什么对接」讲清楚。读完你应该能回答三个问题：</p>
+<ol>
+<li>三个协议（Protocol）各自规定了什么？为什么说"可以完全无视它们"？</li>
+<li><code>mini</code> 这个命令是从哪个函数开始执行的？包安装时还装了哪些命令？</li>
+<li>全局配置 <code>.env</code> 是什么时候、从哪里加载的？</li>
+</ol>
+<h2>二、先把词对齐</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>术语</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Protocol</td>
+<td><code>typing.Protocol</code>，结构化子类型：只规定方法签名，不要求继承</td>
+</tr>
+<tr>
+<td>鸭子类型</td>
+<td>"走起来像鸭子就是鸭子"——实现了协议方法的任何类都能直接用</td>
+</tr>
+<tr>
+<td>src 布局</td>
+<td>包代码放在 <code>src/</code> 下，避免未安装时误导入源码目录</td>
+</tr>
+<tr>
+<td>entry point</td>
+<td><code>pyproject.toml [project.scripts]</code> 声明的命令行入口</td>
+</tr>
+<tr>
+<td>工厂函数</td>
+<td><code>get_model / get_agent / get_environment</code>，把配置字符串变成组件实例</td>
+</tr>
+</tbody>
+</table></div>
+<h2>三、全景：一张带行数的地图</h2>
+<div class="codehilite"><pre><span></span><code>src/minisweagent/                # 版本 2.4.6（__init__.py:11）
+├── __init__.py            92 行  # 协议 + 全局配置 + 启动横幅
+├── exceptions.py          26 行  # 控制流异常家族（m03）
+├── agents/                       # 控制流
+│   ├── __init__.py        28 行  # get_agent 工厂
+│   ├── default.py        190 行  # DefaultAgent（m03）
+│   ├── interactive.py    209 行  # InteractiveAgent（m08）
+│   └── utils/prompt_user.py      # prompt_toolkit 输入会话
+├── models/                       # LM 接口
+│   ├── __init__.py       113 行  # get_model 工厂 + 全局成本统计（m05）
+│   ├── litellm_model.py  164 行  # 默认模型类（m05）
+│   ├── litellm_textbased_model.py # 正则路线（m06）
+│   ├── litellm_response_model.py  # Responses API 路线（m06）
+│   ├── openrouter_*.py / portkey_*.py / requesty_model.py  # 其他网关
+│   ├── test_models.py            # 确定性测试模型（m12）
+│   ├── extra/roulette.py         # 随机/交替多模型（m12）
+│   └── utils/                    # 动作解析、观察格式化、重试、缓存标记
+├── environments/                 # 动作执行
+│   ├── __init__.py        33 行  # get_environment 工厂
+│   ├── local.py           92 行  # 本地子壳（m07）
+│   ├── docker.py         161 行  # Docker 容器（m07）
+│   ├── singularity.py            # HPC 场景（m07）
+│   └── extra/                    # bubblewrap / swerex / contree
+├── run/                          # 入口脚本
+│   ├── mini.py           109 行  # `mini` CLI（m09）
+│   ├── hello_world.py     42 行  # 最小示例
+│   ├── utilities/                # mini-extra 子命令：config / inspector
+│   └── benchmarks/               # swebench / swebench_single / programbench（m11）
+├── config/                       # 内置 YAML（提示词模板，m04/m09）
+└── utils/                        # log.py、serialize.py（recursive_merge）
+</code></pre></div>
+
+<p><strong>读法提示</strong>：三个组件目录（agents/models/environments）的 <code>__init__.py</code> 都是工厂，真正的逻辑在同级模块里；<code>run/</code> 只做组装，不含 agent 逻辑。这是项目"多态"哲学的落地形式——每个类都简单，选择则很丰富（<code>AGENTS.md</code>）。</p>
+<h2>四、<code>__init__.py</code>：被 import 时执行的三段代码</h2>
+<p><code>src/minisweagent/__init__.py</code> 只有 92 行，但 import 即执行，分三段。</p>
+<h3>4.1 版本与路径（11-23 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="n">__version__</span> <span class="o">=</span> <span class="s2">"2.4.6"</span>                                <span class="c1"># :11</span>
+<span class="n">package_dir</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span><span class="o">.</span><span class="n">parent</span>        <span class="c1"># :23</span>
+</code></pre></div>
+
+<p><code>__version__</code> 是单一事实来源：<code>pyproject.toml:98-99</code> 用 <code>version = {attr = "minisweagent.__version__"}</code> 动态读取它，轨迹文件里的 <code>mini_version</code> 也来自它（<code>default.py:173</code>）。<code>package_dir</code> 让入口脚本能找到内置 YAML（如 <code>hello_world.py:35</code>）。</p>
+<h3>4.2 全局配置与启动横幅（26-36 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="n">global_config_dir</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">"MSWEA_GLOBAL_CONFIG_DIR"</span><span class="p">)</span> <span class="ow">or</span> <span class="n">user_config_dir</span><span class="p">(</span><span class="s2">"mini-swe-agent"</span><span class="p">))</span>  <span class="c1"># :26</span>
+<span class="n">global_config_dir</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">parents</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>   <span class="c1"># :27</span>
+<span class="n">global_config_file</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">global_config_dir</span><span class="p">)</span> <span class="o">/</span> <span class="s2">".env"</span>  <span class="c1"># :28</span>
+</code></pre></div>
+
+<ul>
+<li>默认位置由 <code>platformdirs</code> 决定（各操作系统惯例的用户配置目录），可用环境变量 <code>MSWEA_GLOBAL_CONFIG_DIR</code> 覆盖；</li>
+<li><strong>import 即建目录</strong>——所以哪怕只是 import 一下，磁盘上也会出现这个目录；</li>
+<li>30-35 行打印版本横幅和 v2 迁移指南链接，<code>MSWEA_SILENT_STARTUP</code> 可静音；</li>
+<li>36 行 <code>dotenv.load_dotenv(dotenv_path=global_config_file)</code>：<strong>API key 与默认模型名就这样进入环境变量</strong>。这是全局配置的唯一加载点，<code>mini-extra config set</code> 写的也是同一个文件（m09 细讲）。</li>
+</ul>
+<h3>4.3 三个协议（43-80 行）</h3>
+<p>文件 docstring 说得很诚实（<code>__init__.py:6-8</code>）："By the magic of protocols &amp; duck typing, you can pretty much ignore them, unless you want the static type checking."</p>
+<p><strong>Model 协议</strong>（43-58 行），五个方法一个属性：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>成员</th>
+<th>签名要点</th>
+<th>谁在用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>config</code></td>
+<td>任意配置对象</td>
+<td>序列化、模板变量</td>
+</tr>
+<tr>
+<td><code>query(messages, **kwargs) -&gt; dict</code></td>
+<td>核心：问模型，返回<strong>一条</strong>原生格式消息 + <code>extra</code></td>
+<td><code>DefaultAgent.query</code>（<code>default.py:149</code>）</td>
+</tr>
+<tr>
+<td><code>format_message(**kwargs) -&gt; dict</code></td>
+<td>把 role/content/extra 包装成该模型的消息格式</td>
+<td>agent 初始化系统/任务消息</td>
+</tr>
+<tr>
+<td><code>format_observation_messages(message, outputs, template_vars) -&gt; list[dict]</code></td>
+<td>把执行结果包装成观察消息</td>
+<td><code>execute_actions</code>（<code>default.py:157</code>）</td>
+</tr>
+<tr>
+<td><code>get_template_vars(**kwargs) -&gt; dict</code></td>
+<td>向 Jinja 模板贡献变量</td>
+<td><code>default.py:56</code></td>
+</tr>
+<tr>
+<td><code>serialize() -&gt; dict</code></td>
+<td>贡献轨迹元数据</td>
+<td><code>default.py:180</code></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>Environment 协议</strong>（61-70 行），三个方法一个属性：<code>execute(action, cwd="") -&gt; dict</code>、<code>get_template_vars</code>、<code>serialize</code>、<code>config</code>。注意 <code>execute</code> 收的是 <strong>action dict</strong>（含 <code>command</code> 键）而不是裸字符串——这是 v2 的签名变化（<code>v2_migration.md:198</code>）。</p>
+<p><strong>Agent 协议</strong>（73-80 行）最薄：<code>config</code>、<code>run(task, **kwargs) -&gt; dict</code>、<code>save(path, *extra_dicts) -&gt; dict</code>。<code>run</code> 返回最后一条 exit 消息的 <code>extra</code>（含 <code>exit_status</code> 与 <code>submission</code>），不再返回 v1 的元组（<code>v2_migration.md:245-255</code>）。</p>
+<p><strong>关键认知</strong>：协议里没有 <code>messages</code>、<code>cost</code>、<code>n_calls</code>——这些是实现细节而非契约。自定义组件只要方法对得上就能用，不需要 import 或继承任何东西（m12 会实际写一个）。</p>
+<h2>五、<code>pyproject.toml</code>：入口与依赖的哲学</h2>
+<h3>5.1 四个命令，两个入口（89-93 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="k">[project.scripts]</span>
+<span class="n">mini</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"minisweagent.run.mini:app"</span>
+<span class="n">mini-swe-agent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"minisweagent.run.mini:app"</span>
+<span class="n">mini-extra</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"minisweagent.run.utilities.mini_extra:main"</span>
+<span class="n">mini-e</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"minisweagent.run.utilities.mini_extra:main"</span>
+</code></pre></div>
+
+<p><code>mini</code> 与 <code>mini-swe-agent</code> 是同一个 typer app 的别名；<code>mini-extra</code>（别名 <code>mini-e</code>）是子命令集散地，<code>mini_extra.py:13-19</code> 注册了五组：<code>config</code>、<code>inspect/i/inspector</code>、<code>swebench</code>、<code>swebench-single</code>、<code>programbench</code>。分发方式是 <code>import_module(module_path).app(args[1:])</code>（<code>mini_extra.py:43</code>）——纯字符串到模块的映射，没有插件框架。</p>
+<h3>5.2 依赖清单即设计宣言（33-48 行）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>依赖</th>
+<th>用途</th>
+<th>对应章节</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>litellm</code></td>
+<td>统一各家模型 API</td>
+<td>m05</td>
+</tr>
+<tr>
+<td><code>pydantic &gt;= 2.0</code></td>
+<td>配置类（注释指明：v2 的可变默认值安全）</td>
+<td>m03/m09</td>
+</tr>
+<tr>
+<td><code>jinja2</code></td>
+<td>一切提示词/观察模板渲染</td>
+<td>m04</td>
+</tr>
+<tr>
+<td><code>tenacity</code></td>
+<td>模型调用重试</td>
+<td>m05</td>
+</tr>
+<tr>
+<td><code>typer</code> + <code>rich</code></td>
+<td>CLI 与终端渲染</td>
+<td>m08/m09</td>
+</tr>
+<tr>
+<td><code>python-dotenv</code> + <code>platformdirs</code></td>
+<td>全局 <code>.env</code> 加载</td>
+<td>m09</td>
+</tr>
+<tr>
+<td><code>prompt_toolkit</code></td>
+<td>交互输入、历史记录</td>
+<td>m08</td>
+</tr>
+<tr>
+<td><code>textual</code></td>
+<td>inspector 轨迹浏览器</td>
+<td>m10</td>
+</tr>
+<tr>
+<td><code>datasets</code></td>
+<td>加载 SWE-bench 数据集</td>
+<td>m11</td>
+</tr>
+<tr>
+<td><code>pyyaml</code>、<code>requests</code>、<code>openai</code></td>
+<td>YAML 配置、HTTP、Responses API</td>
+<td>各章</td>
+</tr>
+</tbody>
+</table></div>
+<p>两个安全细节值得一提：<code>litellm</code> 排除了被投毒的 1.82.7/1.82.8 版本，<code>openai</code> 排除了有问题的 1.100.0/1.100.1（<code>pyproject.toml:38</code>、<code>:47</code> 注释）。可选依赖按场景分组：<code>modal</code>、<code>contree</code>、<code>dev</code>、<code>full</code>（50-82 行）——核心保持轻，沙箱后端按需安装。</p>
+<h3>5.3 打包的一个易踩坑点</h3>
+<p><code>[tool.setuptools.package-data]</code> 显式包含 <code>config/**/*</code>（<code>pyproject.toml:105-106</code>）。YAML 模板是<strong>包内数据</strong>，靠 <code>package_dir</code> / <code>builtin_config_dir</code> 定位；如果你 fork 后加了新配置文件却忘了这行，pip 安装后配置会神秘失踪。</p>
+<h2>六、三个工厂：字符串如何变成对象</h2>
+<p>三个组件目录的 <code>__init__.py</code> 是同一个模式的三份拷贝，以 <code>get_agent</code> 为例（<code>agents/__init__.py:25-28</code>）：</p>
+<div class="codehilite"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">get_agent</span><span class="p">(</span><span class="n">model</span><span class="p">:</span> <span class="n">Model</span><span class="p">,</span> <span class="n">env</span><span class="p">:</span> <span class="n">Environment</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="nb">dict</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">default_type</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">""</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Agent</span><span class="p">:</span>
+    <span class="n">config</span> <span class="o">=</span> <span class="n">copy</span><span class="o">.</span><span class="n">deepcopy</span><span class="p">(</span><span class="n">config</span><span class="p">)</span>
+    <span class="n">agent_class</span> <span class="o">=</span> <span class="n">get_agent_class</span><span class="p">(</span><span class="n">config</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">"agent_class"</span><span class="p">,</span> <span class="n">default_type</span><span class="p">))</span>
+    <span class="k">return</span> <span class="n">agent_class</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">env</span><span class="p">,</span> <span class="o">**</span><span class="n">config</span><span class="p">)</span>
+</code></pre></div>
+
+<p>四步：深拷贝防污染 → 弹出 <code>agent_class</code> 键 → 短名查映射表（<code>"interactive"</code> → 全限定路径，<code>agents/__init__.py:8-11</code>）或直接当 import 路径 → <code>importlib</code> 加载并实例化。<strong>短名是便利，全路径是逃生门</strong>——你自己的类不需要进任何注册表，写全限定名即可（m09/m12 展开）。</p>
+<p><code>get_model</code> 多两步：模型名三级解析（参数 &gt; 配置 &gt; <code>MSWEA_MODEL_NAME</code> 环境变量，<code>models/__init__.py:65-75</code>），以及 Anthropic 系模型自动开启缓存标记（55-60 行）。<code>get_environment</code> 与 <code>get_agent</code> 几乎逐行同构（<code>environments/__init__.py:30-33</code>）。</p>
+<h2>七、小结</h2>
+<ul>
+<li>包的第一动作发生在 import 时：建全局配置目录、加载 <code>.env</code>、打印横幅（<code>__init__.py:26-36</code>）。</li>
+<li>三个协议是<strong>可选的静态检查辅助</strong>，运行时靠鸭子类型；协议方法之外的属性都是实现细节。</li>
+<li>入口只有两处：<code>run/mini.py</code>（CLI）与 <code>run/utilities/mini_extra.py</code>（子命令）；其余 run 脚本都是 Python bindings 的组装示例。</li>
+<li>工厂函数 = 映射表 + importlib，全路径类名是一等公民。这为 m12 的"不改源码做扩展"埋下伏笔。</li>
+<li>下一章进入全书核心：190 行的 agent 主循环。</li>
+</ul>
+<div class="pager"><a href="m01-overview.html"><span class="dir">← 上一章</span>概览 —— 一百行代码，74% 的 SWE-bench</a><a class="next" href="m03-agent-loop.html"><span class="dir">下一章 →</span>Agent 循环 —— 异常是唯一的控制流</a></div>
+  </div>
+</div>
+</div>
+<script>function toggleTheme(){var h=document.documentElement;
+var t=h.dataset.theme==="dark"?"light":"dark";h.dataset.theme=t;localStorage.setItem("theme",t);}</script>
+</body>
+</html>

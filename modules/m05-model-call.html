@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>模型调用 —— 重试、计费与格式错误契约 | mini-swe-agent 源码教程</title>
+<script>(function(){var t=localStorage.getItem("theme");
+if(!t){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
+document.documentElement.dataset.theme=t;})();</script>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../pygments.css">
+</head>
+<body>
+<div class="page">
+<aside class="sidebar">
+  <p class="book-title">mini-swe-agent<br>源码教程</p>
+  <p class="book-sub">基于 v2.4.6 · 12 章</p>
+  <nav><a href="../index.html">首页</a>
+<a href="../modules/m01-overview.html"><span class="no">M01</span>概览</a>
+<a href="../modules/m02-package-map.html"><span class="no">M02</span>包地图</a>
+<a href="../modules/m03-agent-loop.html"><span class="no">M03</span>Agent 循环</a>
+<a href="../modules/m04-messages-templates.html"><span class="no">M04</span>消息与模板</a>
+<a href="../modules/m05-model-call.html" class="active"><span class="no">M05</span>模型调用</a>
+<a href="../modules/m06-actions.html"><span class="no">M06</span>动作解析</a>
+<a href="../modules/m07-environments.html"><span class="no">M07</span>环境</a>
+<a href="../modules/m08-interactive.html"><span class="no">M08</span>交互模式</a>
+<a href="../modules/m09-config.html"><span class="no">M09</span>配置系统</a>
+<a href="../modules/m10-trajectory.html"><span class="no">M10</span>轨迹持久化</a>
+<a href="../modules/m11-swebench.html"><span class="no">M11</span>基准测试</a>
+<a href="../modules/m12-extending.html"><span class="no">M12</span>扩展指南</a></nav>
+</aside>
+<div class="main">
+  <div class="topbar"><button class="theme-toggle" onclick="toggleTheme()">切换明暗</button></div>
+  <div class="content">
+<h1>模型调用 —— 重试、计费与格式错误契约</h1>
+<p class="meta">约 19 分钟读完</p><blockquote>
+<p>本章源文件：<code>src/minisweagent/models/litellm_model.py</code>（164 行）、<code>models/utils/retry.py</code>、<code>models/utils/cache_control.py</code>、<code>models/utils/anthropic_utils.py</code>、<code>models/__init__.py</code>。</p>
+</blockquote>
+<h2>一、引子：一次 query 背后的五件事</h2>
+<p><code>DefaultAgent.query</code> 里只有一行 <code>self.model.query(self.messages)</code>（<code>default.py:149</code>）。这一行背后，<code>LitellmModel</code> 要做五件事：清洗消息、重试调用、核算成本、解析动作、组装返回。任何一件出错都有讲究。读完你应该能回答三个问题：</p>
+<ol>
+<li>哪些错误会重试、哪些立刻放弃？重试的节奏是什么？</li>
+<li>成本是怎么算出来的？算不出来会怎样？全局限额和实例限额有什么区别？</li>
+<li>解析失败时，为什么异常里必须塞进原始响应和成本？</li>
+</ol>
+<h2>二、先把词对齐</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>术语</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>litellm</td>
+<td>统一上百家模型 API 的适配层，<code>completion()</code> 一个入口打天下</td>
+</tr>
+<tr>
+<td>abort exceptions</td>
+<td>不重试、立刻抛出的异常清单</td>
+</tr>
+<tr>
+<td>cache control</td>
+<td>Anthropic 的显式提示缓存标记，省钱关键</td>
+</tr>
+<tr>
+<td>FormatError 契约</td>
+<td>解析失败时异常必须携带 cost 与 response 的约定</td>
+</tr>
+<tr>
+<td>GLOBAL_MODEL_STATS</td>
+<td>进程级成本/调用计数，跨所有限额实例共享</td>
+</tr>
+</tbody>
+</table></div>
+<h2>三、全景：query() 的流水线（81-106 行）</h2>
+<div class="codehilite"><pre><span></span><code>query(messages)
+│
+├─ ① _prepare_messages_for_api        :76-79
+│     剥 extra → thinking 块重排 → 缓存标记
+│
+├─ ② retry 包装的 _query              :82-84
+│     litellm.completion(model, messages, tools=[BASH_TOOL])  :66-71
+│     最多 10 次，指数退避 4~60s，abort 清单除外
+│
+├─ ③ _calculate_cost                  :85 → :108-126
+│     litellm.cost_calculator.completion_cost
+│     GLOBAL_MODEL_STATS.add(cost)    :86（全局限额在这里触发）
+│
+├─ ④ _parse_actions                   :89 → :128-135
+│     成功 → actions 列表
+│     失败 → FormatError：回填 cost + response 后抛出  :90-98
+│
+└─ ⑤ 组装消息                          :99-106
+      response.choices[0].message.model_dump()
+      + extra{actions, response, cost, timestamp}
+</code></pre></div>
+
+<h2>四、① 消息清洗：三步流水线（76-79 行）</h2>
+<div class="codehilite"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">_prepare_messages_for_api</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">messages</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">]:</span>
+    <span class="n">prepared</span> <span class="o">=</span> <span class="p">[{</span><span class="n">k</span><span class="p">:</span> <span class="n">v</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">msg</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">k</span> <span class="o">!=</span> <span class="s2">"extra"</span><span class="p">}</span> <span class="k">for</span> <span class="n">msg</span> <span class="ow">in</span> <span class="n">messages</span><span class="p">]</span>  <span class="c1"># :77</span>
+    <span class="n">prepared</span> <span class="o">=</span> <span class="n">_reorder_anthropic_thinking_blocks</span><span class="p">(</span><span class="n">prepared</span><span class="p">)</span>                          <span class="c1"># :78</span>
+    <span class="k">return</span> <span class="n">set_cache_control</span><span class="p">(</span><span class="n">prepared</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">set_cache_control</span><span class="p">)</span>           <span class="c1"># :79</span>
+</code></pre></div>
+
+<p><strong>第一步剥 extra</strong>（m04 讲过）。第二步和第三步都是 Anthropic 兼容性补丁。</p>
+<h3>4.1 thinking 块重排（anthropic_utils.py:11-28）</h3>
+<p>Anthropic 要求 assistant 消息里 thinking 块必须在其他块之前。轨迹里的消息顺序是模型原生输出，重放时可能不满足这个约束，于是发送前重排：thinking 块提前（24 行）；如果一条消息<strong>只有</strong> thinking 块，补一个空 text 块兜底（26 行）。不改轨迹本身，只改发送副本。</p>
+<h3>4.2 缓存标记：只标最后一条（cache_control.py:49-67）</h3>
+<p><code>set_cache_control</code> 的 <code>default_end</code> 模式逻辑出人意料地简单（62-66 行）：<strong>倒序遍历，清掉所有旧标记，只给最新一条消息打上 <code>cache_control: {"type": "ephemeral"}</code></strong>。</p>
+<p>为什么只标一条？Anthropic 的缓存语义是"标记点之前的全部内容可缓存"。标在最后一条 = 整个历史都是缓存前缀，下一轮只需为新增消息付全价。每轮标记位置后移，前缀持续命中——这就是长会话省钱的机制。</p>
+<p>两个兼容细节：content 为 None 的纯 tool_use 消息直接在消息级打标（29-31 行）；<code>role="tool"</code> 的消息要把标记从 content 块挪到消息级（43-46 行，注释自称 "Workaround for weird bug"）。</p>
+<p><strong>默认开关在工厂里</strong>：<code>get_model</code> 发现模型名含 anthropic/sonnet/opus/claude 且用户没显式配置时，自动设 <code>set_cache_control="default_end"</code>（<code>models/__init__.py:55-60</code>）。用 Anthropic 模型而不自知地省了钱，就是这一行。</p>
+<h2>五、② 重试：tenacity 的薄包装（retry.py:19-25）</h2>
+<div class="codehilite"><pre><span></span><code><span class="k">return</span> <span class="n">Retrying</span><span class="p">(</span>
+    <span class="n">reraise</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">stop</span><span class="o">=</span><span class="n">stop_after_attempt</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s2">"MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT"</span><span class="p">,</span> <span class="s2">"10"</span><span class="p">))),</span>
+    <span class="n">wait</span><span class="o">=</span><span class="n">wait_exponential</span><span class="p">(</span><span class="n">multiplier</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="nb">min</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span> <span class="nb">max</span><span class="o">=</span><span class="mi">60</span><span class="p">),</span>
+    <span class="n">before_sleep</span><span class="o">=</span><span class="n">before_sleep_log</span><span class="p">(</span><span class="n">logger</span><span class="p">,</span> <span class="n">logging</span><span class="o">.</span><span class="n">WARNING</span><span class="p">),</span>
+    <span class="n">retry</span><span class="o">=</span><span class="n">retry_if_not_exception_type</span><span class="p">(</span><span class="nb">tuple</span><span class="p">(</span><span class="n">abort_exceptions</span><span class="p">)),</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<ul>
+<li>最多 <strong>10 次</strong>（环境变量可调），指数退避 <strong>4 秒起步、60 秒封顶</strong>；</li>
+<li><code>reraise=True</code>：重试耗尽后抛原始异常，不包 tenacity 自己的 RetryError；</li>
+<li>每次重试前 WARNING 级日志。</li>
+</ul>
+<p><strong>abort 清单</strong>（<code>litellm_model.py:50-57</code>）是"重试也没用"的集合：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>异常</th>
+<th>为什么不重试</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>UnsupportedParamsError</code></td>
+<td>参数不被该模型支持，重试一万次也一样</td>
+</tr>
+<tr>
+<td><code>NotFoundError</code></td>
+<td>模型名写错了</td>
+</tr>
+<tr>
+<td><code>PermissionDeniedError</code> / <code>AuthenticationError</code></td>
+<td>权限/key 问题</td>
+</tr>
+<tr>
+<td><code>ContextWindowExceededError</code></td>
+<td>历史超上下文——重试不会变短（m03 的"不剪枝"立场在此收场）</td>
+</tr>
+<tr>
+<td><code>KeyboardInterrupt</code></td>
+<td>用户要停</td>
+</tr>
+</tbody>
+</table></div>
+<p>其余异常（网络抖动、429 限流、5xx）都会重试。认证错误还有一处人性化处理：<code>_query</code> 捕获 <code>AuthenticationError</code> 后在消息尾部追加"用 <code>mini-extra config set KEY VALUE</code> 永久设置 key"的提示再抛出（72-74 行）。</p>
+<h2>六、③ 计费：一笔成本，两处限额</h2>
+<h3>6.1 单次成本核算（108-126 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="n">cost</span> <span class="o">=</span> <span class="n">litellm</span><span class="o">.</span><span class="n">cost_calculator</span><span class="o">.</span><span class="n">completion_cost</span><span class="p">(</span><span class="n">response</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">model_name</span><span class="p">)</span>  <span class="c1"># :110</span>
+<span class="k">if</span> <span class="n">cost</span> <span class="o">&lt;=</span> <span class="mf">0.0</span><span class="p">:</span>
+    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>                                                               <span class="c1"># :111-112</span>
+</code></pre></div>
+
+<p>litellm 维护各模型价目表，按 response 里的 usage 算钱。算不出来（模型未注册、本地模型无价格）或算出非正值时的行为由 <code>cost_tracking</code> 配置决定（113-125 行）：</p>
+<ul>
+<li><code>"default"</code>：打 CRITICAL 日志并抛 <code>RuntimeError</code>，错误信息里给出三条出路（配置 <code>ignore_errors</code>、环境变量 <code>MSWEA_COST_TRACKING</code>、读本地模型文档）；</li>
+<li><code>"ignore_errors"</code>：成本记 0，继续跑。</li>
+</ul>
+<p><strong>宁可响亮地失败，也不默不作声地免费</strong>——默认策略防止你在"以为有成本护栏"的情况下裸奔。本地模型/自托管模型记得配 <code>litellm_model_registry</code>（32-33 行）注册价格，或直接 <code>ignore_errors</code>。</p>
+<h3>6.2 全局统计与全局限额（models/<strong>init</strong>.py:13-42）</h3>
+<p>每次调用后 <code>GLOBAL_MODEL_STATS.add(cost)</code>（<code>litellm_model.py:86</code>）。这个进程级单例（42 行）：</p>
+<ul>
+<li>用 <code>threading.Lock</code> 保护累计（27-29 行）——m11 的多线程批量跑全靠它；</li>
+<li>支持两个环境变量限额：<code>MSWEA_GLOBAL_COST_LIMIT</code>、<code>MSWEA_GLOBAL_CALL_LIMIT</code>（20-21 行）；</li>
+<li>触发条件是 <code>0 &lt; cost_limit &lt; self._cost or 0 &lt; call_limit &lt; self._n_calls + 1</code>（30 行）——注意 <strong><code>+1</code></strong>：调用次数限额是"预判下一次会超就现在停"，比成本限额（花超了才停）更保守一格；</li>
+<li>超限抛 <code>RuntimeError</code>——这不是 <code>InterruptAgentFlow</code>，会走 <code>run</code> 的未捕获异常分支：记录轨迹、re-raise、进程退出（m03）。</li>
+</ul>
+<p><strong>两级限额的关系</strong>：实例级 <code>cost_limit</code>（默认 $3）管单个任务；全局级管整个进程。批量跑 500 个 SWE-bench 实例时，单实例 $3 × 500 = $1500 的保险丝就是全局限额。</p>
+<h2>七、④ FormatError 契约：失败也要留下证据</h2>
+<p>87 行的注释是契约原文：</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Note: all model.query() implementations must persist the response and cost on FormatError.</span>
+</code></pre></div>
+
+<p>履行代码（90-98 行）：</p>
+<div class="codehilite"><pre><span></span><code><span class="k">except</span> <span class="n">FormatError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+    <span class="n">e</span><span class="o">.</span><span class="n">messages</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="s2">"extra"</span><span class="p">]</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">cost_output</span><span class="p">)</span>                       <span class="c1"># :91  回填成本</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">e</span><span class="o">.</span><span class="n">messages</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="s2">"extra"</span><span class="p">][</span><span class="s2">"response"</span><span class="p">]</span> <span class="o">=</span> <span class="n">response</span><span class="o">.</span><span class="n">model_dump</span><span class="p">(</span><span class="n">mode</span><span class="o">=</span><span class="s2">"json"</span><span class="p">)</span>  <span class="c1"># :93</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+        <span class="n">e</span><span class="o">.</span><span class="n">messages</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="s2">"extra"</span><span class="p">][</span><span class="s2">"response"</span><span class="p">]</span> <span class="o">=</span> <span class="nb">repr</span><span class="p">(</span><span class="n">response</span><span class="p">)</span>          <span class="c1"># :97  序列化失败也要留 repr</span>
+    <span class="k">raise</span>
+</code></pre></div>
+
+<p>为什么必须这样？回忆 m03 的账本：FormatError 绕过了 <code>query()</code> 的正常计费点，agent 只能从 <code>e.messages[0].extra.cost</code> 补记（<code>default.py:102</code>）。而 <code>response</code> 的留存是为了<strong>事后能回答"模型到底回了什么"</strong>——格式错误是调试提示词的第一现场，没有原始响应就只能猜。97 行的 repr 兜底保证契约无条件成立：哪怕响应对象序列化不了，也留下可读的痕迹。</p>
+<p>自定义模型类必须履行同样的契约（m12 检查清单里有这一条）。</p>
+<h2>八、⑤ 组装返回与工厂</h2>
+<p>成功路径的组装（99-106 行）m04 已讲：原生 message + extra 四件套。最后看工厂 <code>get_model</code>（<code>models/__init__.py:45-62</code>）如何把配置变成实例：</p>
+<ol>
+<li><strong>模型名三级解析</strong>（<code>get_model_name</code>，65-75 行）：显式参数 &gt; 配置里的 <code>model_name</code> &gt; <code>MSWEA_MODEL_NAME</code> 环境变量；都没有则抛错并指引跑 <code>mini-extra config setup</code>；</li>
+<li><strong>模型类选择</strong>（<code>get_model_class</code>，92-113 行）：<code>model_class</code> 配置优先，短名查 <code>_MODEL_CLASS_MAPPING</code>（78-89 行，10 个注册名），否则当全限定 import 路径；都没给就默认 <code>LitellmModel</code>；</li>
+<li>Anthropic 自动缓存标记（55-60 行，本章 4.2 节）；</li>
+<li><code>model_class(**config)</code> 实例化。</li>
+</ol>
+<p>模型家族一览（映射表 78-89 行）：<code>litellm</code>（默认）、<code>litellm_textbased</code>、<code>litellm_response</code>、<code>openrouter</code> 三变体、<code>portkey</code> 两变体、<code>requesty</code>、<code>deterministic</code>（测试用）。三条解析路线的差异是下一章的主题。</p>
+<h2>九、小结</h2>
+<ul>
+<li>一次 query 五件事：清洗（剥 extra/thinking 重排/缓存标记）→ 重试调用 → 计费 → 解析 → 组装。</li>
+<li>重试 10 次、4~60s 指数退避；参数错误、认证失败、上下文超限等"重试无意义"异常直接放弃。</li>
+<li>成本默认必须算得出，算不出就抛错；实例限额管单任务，全局限额（线程安全）管整进程。</li>
+<li>FormatError 契约：异常必须带 cost 与 response——agent 补记账，人类留证据。</li>
+<li>Anthropic 模型自动获得"只标最后一条"的缓存策略，长会话持续命中前缀。</li>
+<li>下一章：解析动作的三条路线，以及"一个 bash 工具"的完整含义。</li>
+</ul>
+<div class="pager"><a href="m04-messages-templates.html"><span class="dir">← 上一章</span>消息与模板 —— 一切皆 dict，渲染靠 Jinja</a><a class="next" href="m06-actions.html"><span class="dir">下一章 →</span>动作解析 —— 一个 bash 工具打天下</a></div>
+  </div>
+</div>
+</div>
+<script>function toggleTheme(){var h=document.documentElement;
+var t=h.dataset.theme==="dark"?"light":"dark";h.dataset.theme=t;localStorage.setItem("theme",t);}</script>
+</body>
+</html>

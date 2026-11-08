@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>基准测试 —— 批量跑 SWE-bench 的工程细节 | mini-swe-agent 源码教程</title>
+<script>(function(){var t=localStorage.getItem("theme");
+if(!t){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
+document.documentElement.dataset.theme=t;})();</script>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../pygments.css">
+</head>
+<body>
+<div class="page">
+<aside class="sidebar">
+  <p class="book-title">mini-swe-agent<br>源码教程</p>
+  <p class="book-sub">基于 v2.4.6 · 12 章</p>
+  <nav><a href="../index.html">首页</a>
+<a href="../modules/m01-overview.html"><span class="no">M01</span>概览</a>
+<a href="../modules/m02-package-map.html"><span class="no">M02</span>包地图</a>
+<a href="../modules/m03-agent-loop.html"><span class="no">M03</span>Agent 循环</a>
+<a href="../modules/m04-messages-templates.html"><span class="no">M04</span>消息与模板</a>
+<a href="../modules/m05-model-call.html"><span class="no">M05</span>模型调用</a>
+<a href="../modules/m06-actions.html"><span class="no">M06</span>动作解析</a>
+<a href="../modules/m07-environments.html"><span class="no">M07</span>环境</a>
+<a href="../modules/m08-interactive.html"><span class="no">M08</span>交互模式</a>
+<a href="../modules/m09-config.html"><span class="no">M09</span>配置系统</a>
+<a href="../modules/m10-trajectory.html"><span class="no">M10</span>轨迹持久化</a>
+<a href="../modules/m11-swebench.html" class="active"><span class="no">M11</span>基准测试</a>
+<a href="../modules/m12-extending.html"><span class="no">M12</span>扩展指南</a></nav>
+</aside>
+<div class="main">
+  <div class="topbar"><button class="theme-toggle" onclick="toggleTheme()">切换明暗</button></div>
+  <div class="content">
+<h1>基准测试 —— 批量跑 SWE-bench 的工程细节</h1>
+<p class="meta">约 17 分钟读完</p><blockquote>
+<p>本章源文件：<code>run/benchmarks/swebench.py</code>（275 行）、<code>swebench_single.py</code>（100 行）、<code>utils/batch_progress.py</code>（178 行）、<code>utils/common.py</code>（17 行）、<code>config/benchmarks/swebench.yaml</code>（183 行）。</p>
+</blockquote>
+<h2>一、引子：74% 是怎么跑出来的</h2>
+<p>m01 的成绩单背后是 <code>mini-extra swebench</code>：加载数据集、为每个 issue 起一个 Docker 容器、并发跑 agent、收集 patch、汇总死因。这一章讲把"跑一个任务"变成"跑五百个任务"要补哪些工程。读完你应该能回答三个问题：</p>
+<ol>
+<li>一个 SWE-bench instance 从数据集到 preds.json 的完整旅程是什么？</li>
+<li>跑到一半断了怎么办？为什么重跑同一命令不会重复花钱？</li>
+<li>多线程并发下，成本统计、进度条、结果文件各自怎么保证线程安全？</li>
+</ol>
+<h2>二、先把词对齐</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>术语</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>instance</td>
+<td>一个评测样本：真实 repo 的 issue（<code>problem_statement</code>）+ 专属 Docker 镜像</td>
+</tr>
+<tr>
+<td>preds.json</td>
+<td>汇总产出文件：<code>{instance_id: {model_name_or_path, instance_id, model_patch}}</code></td>
+</tr>
+<tr>
+<td>submission / model_patch</td>
+<td>agent 提交的 git diff 文本，评测器拿它跑测试判对错</td>
+</tr>
+<tr>
+<td>exit_status</td>
+<td>每个 instance 的死因，汇总成 yaml 报告</td>
+</tr>
+<tr>
+<td>subset</td>
+<td>数据集变体：lite / verified / full / multimodal 等</td>
+</tr>
+</tbody>
+</table></div>
+<h2>三、全景：main 的流水线（202-271 行）</h2>
+<div class="codehilite"><pre><span></span><code>mini-extra swebench --subset lite --slice 0:10 -w 4 -m ...
+│
+├─ 输出目录 + 文件日志                    :217-220
+├─ load_dataset(subset, split)           :222-226  （DATASET_MAPPING 53-62）
+├─ filter_instances：正则过滤/切片/洗牌   :228 → :180-197
+├─ 跳过 preds.json 里已完成的 instance    :229-232  ← 断点续跑
+├─ 配置合并（YAML + CLI 覆盖）            :235-241
+├─ RunBatchProgressManager               :243
+└─ Live 进度界面 + ThreadPoolExecutor    :256-271
+     └─ 每个 instance → process_instance :122-177
+</code></pre></div>
+
+<h2>四、一个 instance 的旅程（process_instance，122-177 行）</h2>
+<h3>4.1 开场先清场（129-133 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="n">remove_from_preds_file</span><span class="p">(</span><span class="n">output_dir</span> <span class="o">/</span> <span class="s2">"preds.json"</span><span class="p">,</span> <span class="n">instance_id</span><span class="p">)</span>      <span class="c1"># :132</span>
+<span class="p">(</span><span class="n">instance_dir</span> <span class="o">/</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">instance_id</span><span class="si">}</span><span class="s2">.traj.json"</span><span class="p">)</span><span class="o">.</span><span class="n">unlink</span><span class="p">(</span><span class="n">missing_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span> <span class="c1"># :133</span>
+</code></pre></div>
+
+<p>注释说明意图（131 行）：避免上次失败的残留造成不一致状态。<strong>先删旧结果再开跑</strong>——配合后面的"跳过已完成"逻辑，preds.json 里的条目永远代表完整成功的运行。</p>
+<h3>4.2 环境：镜像名里的魔法（68-94 行）</h3>
+<p><code>get_swebench_docker_image_name</code>（68-76 行）：instance 自带镜像名就用，否则按约定构造 <code>docker.io/swebench/sweb.eval.x86_64.{id}:latest</code>。Docker 镜像名不允许双下划线，所以 instance_id 里的 <code>__</code> 替换成 <code>_1776_</code>（74 行，注释自称 magic token）。</p>
+<p><code>get_sb_environment</code>（79-94 行）：默认 docker；singularity/contree 要加 <code>docker://</code> 前缀（85-86 行）；支持 <code>env_startup_command</code>——用 instance 字段渲染后先跑一条初始化命令，非零返回码直接抛错（89-93 行）。</p>
+<h3>4.3 跑 agent：ProgressTrackingAgent（145-156 行）</h3>
+<p>批量跑用的不是 DefaultAgent 而是 <code>ProgressTrackingAgent</code>（<code>utils/common.py:7-17</code>）——只覆写 step，先报一句 <code>Step N ($cost)</code> 再调父类。m03 说过 step 是子类的标准插头，这是最简实证。</p>
+<h3>4.4 收尾：finally 里的三件事（157-177 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+    <span class="n">exit_status</span><span class="p">,</span> <span class="n">result</span> <span class="o">=</span> <span class="nb">type</span><span class="p">(</span><span class="n">e</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span><span class="p">,</span> <span class="s2">""</span>                       <span class="c1"># :159</span>
+    <span class="n">extra_info</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"traceback"</span><span class="p">:</span> <span class="o">...</span><span class="p">,</span> <span class="s2">"exception_str"</span><span class="p">:</span> <span class="o">...</span><span class="p">}</span>            <span class="c1"># :160</span>
+<span class="k">finally</span><span class="p">:</span>
+    <span class="n">agent</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">traj_path</span><span class="p">,</span> <span class="p">{</span><span class="s2">"info"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"exit_status"</span><span class="p">:</span> <span class="o">...</span><span class="p">,</span> <span class="s2">"submission"</span><span class="p">:</span> <span class="o">...</span><span class="p">,</span> <span class="o">**</span><span class="n">extra_info</span><span class="p">},</span>
+                           <span class="s2">"instance_id"</span><span class="p">:</span> <span class="n">instance_id</span><span class="p">})</span>              <span class="c1"># :162-174</span>
+    <span class="n">update_preds_file</span><span class="p">(</span><span class="n">output_dir</span> <span class="o">/</span> <span class="s2">"preds.json"</span><span class="p">,</span> <span class="n">instance_id</span><span class="p">,</span> <span class="n">model_name</span><span class="p">,</span> <span class="n">result</span><span class="p">)</span>  <span class="c1"># :176</span>
+    <span class="n">progress_manager</span><span class="o">.</span><span class="n">on_instance_end</span><span class="p">(</span><span class="n">instance_id</span><span class="p">,</span> <span class="n">exit_status</span><span class="p">)</span>       <span class="c1"># :177</span>
+</code></pre></div>
+
+<p>任何异常都被收成"异常类名当 exit_status"，<strong>单个 instance 失败不拖垮整批</strong>。save 的 extra_dicts 覆写轨迹元数据（m10 的合并顺序在此用上）；preds.json 里失败 instance 的 patch 是空串——评测时自然判错。</p>
+<h2>五、并发与线程安全</h2>
+<h3>5.1 执行模型（256-271 行）</h3>
+<p><code>ThreadPoolExecutor(max_workers=workers)</code> + rich <code>Live</code> 进度界面。线程而非进程：瓶颈在 API 与 Docker I/O，GIL 不是问题；且线程共享 <code>GLOBAL_MODEL_STATS</code>，成本汇总天然统一。</p>
+<p>Ctrl-C 的处理（264-271 行）：第一次按下取消所有<strong>未开始</strong>的 future，等在跑的自然结束；再按一次才立即退出。批量评测的礼貌中断。</p>
+<h3>5.2 三处锁</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>共享资源</th>
+<th>保护</th>
+<th>位置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>preds.json 读改写</td>
+<td><code>_OUTPUT_FILE_LOCK</code></td>
+<td><code>swebench.py:65</code>、97-108、111-119</td>
+</tr>
+<tr>
+<td>全局成本/调用数</td>
+<td><code>GlobalModelStats._lock</code></td>
+<td><code>models/__init__.py:19</code>、27-29</td>
+</tr>
+<tr>
+<td>进度条与状态表</td>
+<td><code>RunBatchProgressManager._lock</code></td>
+<td><code>batch_progress.py:52</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>preds.json 的更新是"读全量 → 改一项 → 写全量"（100-108 行），无锁必丢数据；锁是模块级单例，所有 worker 线程共享。</p>
+<h3>5.3 进度界面（batch_progress.py）</h3>
+<p>三层渲染（82 行的 Group）：总进度条（含<strong>实时总成本</strong>，117-123 行从 GLOBAL_MODEL_STATS 读）、exit_status 汇总表（99-115 行，按数量排序、列最近 instance）、每个在跑 instance 一行状态。ETA 用已完成均速估算（89-97 行），且主进度条前 5 分钟不做速度估计（66 行注释）——避免初期抖动误导。</p>
+<p>每有 instance 结束就把汇总写一份 <code>exit_statuses_&lt;timestamp&gt;.yaml</code>（155-156、175-178 行）——界面之外留持久报告。</p>
+<h2>六、断点续跑与筛选</h2>
+<h3>6.1 续跑（229-232 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="k">if</span> <span class="ow">not</span> <span class="n">redo_existing</span> <span class="ow">and</span> <span class="p">(</span><span class="n">output_path</span> <span class="o">/</span> <span class="s2">"preds.json"</span><span class="p">)</span><span class="o">.</span><span class="n">exists</span><span class="p">():</span>
+    <span class="n">existing_instances</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="o">...</span><span class="p">)</span><span class="o">.</span><span class="n">keys</span><span class="p">())</span>
+    <span class="n">instances</span> <span class="o">=</span> <span class="p">[</span><span class="n">i</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">instances</span> <span class="k">if</span> <span class="n">i</span><span class="p">[</span><span class="s2">"instance_id"</span><span class="p">]</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">existing_instances</span><span class="p">]</span>
+</code></pre></div>
+
+<p><strong>同一输出目录重跑同一命令 = 只补未完成</strong>。想重跑全部加 <code>--redo-existing</code>。配合 4.1 的"先清场"，中断重跑不会留下半旧半新的结果。</p>
+<h3>6.2 筛选（filter_instances，180-197 行）</h3>
+<p>三个操作按序：洗牌（<code>--shuffle</code>，先按 id 排序再 <code>random.seed(42)</code> 洗——<strong>可复现的随机</strong>，184-187 行）→ 正则过滤 instance_id（189 行）→ Python 切片语法 <code>--slice 0:5</code>（192-194 行）。冒烟测试常用 <code>--slice 0:3 --subset lite</code>。</p>
+<h2>七、swebench.yaml：评测专用的提示词工程</h2>
+<p>与 <code>mini.yaml</code> 的关键差异（<code>config/benchmarks/swebench.yaml</code>）：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>配置</th>
+<th>值</th>
+<th>为什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>step_limit</code></td>
+<td>250（112 行）</td>
+<td>评测要封顶，CLI 默认不限</td>
+</tr>
+<tr>
+<td><code>environment.cwd</code></td>
+<td><code>/testbed</code>（116 行）</td>
+<td>SWE-bench 镜像的 repo 位置</td>
+</tr>
+<tr>
+<td><code>environment.interpreter</code></td>
+<td><code>["bash", "-c"]</code>（118 行）</td>
+<td>非登录 shell</td>
+</tr>
+<tr>
+<td><code>env.BASH_ENV</code></td>
+<td><code>/root/.bashrc</code>（125-127 行）</td>
+<td>注释解释：<code>bash -c</code> 不读 bashrc，靠 BASH_ENV 让镜像里的 <code>conda activate testbed</code> 生效，否则命令跑在 base 环境</td>
+</tr>
+<tr>
+<td><code>model_kwargs.parallel_tool_calls</code></td>
+<td><code>true</code>（183 行）</td>
+<td>鼓励模型一次发多个独立命令</td>
+</tr>
+<tr>
+<td>提交流程</td>
+<td><code>git diff &gt; patch.txt</code> → 检查 → <code>echo 哨兵 &amp;&amp; cat patch.txt</code>（77-110 行）</td>
+<td>submission 必须是 patch；哨兵与 cat 用 &amp;&amp; 连接，cat 失败则返回码非零不提交</td>
+</tr>
+</tbody>
+</table></div>
+<p>最后一条与 m07 的哨兵判定严丝合缝：<code>echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT &amp;&amp; cat patch.txt</code> 的首行是哨兵、余行是 patch、返回码 0——三条件全中，submission 就是 patch 文本。提示词还严禁提交测试文件/辅助脚本/二进制（84-92 行），这些都是评测有效性的护栏。</p>
+<h2>八、swebench_single：调试单例的入口</h2>
+<p><code>swebench_single.py</code>（100 行）是批量版的单发变体：<code>-i</code> 给 instance_id 或排序后的索引（65-67 行），默认 interactive agent（94 行）——可以 confirm 模式围观模型解一个真实 issue，是理解评测行为的最佳实验场。环境构造复用 <code>get_sb_environment</code>（89 行），配置流水线与 mini.py 同构。</p>
+<h2>九、小结</h2>
+<ul>
+<li>批量跑 = 数据集加载 → 筛选/续跑 → 线程池 → 每实例独立容器与轨迹 → preds.json 汇总。</li>
+<li>线程安全三处锁：结果文件、全局统计、进度管理；失败实例以异常类名记 exit_status，不拖垮批次。</li>
+<li>断点续跑靠 preds.json 键集合 + 开跑先清场；洗牌固定 seed 42 可复现。</li>
+<li>评测提示词的关键护栏：250 步封顶、/testbed、BASH_ENV 激活 conda、patch 提交三条件。</li>
+<li>最后一章：不改源码，把这些组件换成你自己的。</li>
+</ul>
+<div class="pager"><a href="m10-trajectory.html"><span class="dir">← 上一章</span>轨迹持久化 —— traj.json 与 inspector</a><a class="next" href="m12-extending.html"><span class="dir">下一章 →</span>扩展指南 —— 写你自己的 Model/Environment/Agent</a></div>
+  </div>
+</div>
+</div>
+<script>function toggleTheme(){var h=document.documentElement;
+var t=h.dataset.theme==="dark"?"light":"dark";h.dataset.theme=t;localStorage.setItem("theme",t);}</script>
+</body>
+</html>

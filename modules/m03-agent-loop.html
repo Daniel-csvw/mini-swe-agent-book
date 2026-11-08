@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent 循环 —— 异常是唯一的控制流 | mini-swe-agent 源码教程</title>
+<script>(function(){var t=localStorage.getItem("theme");
+if(!t){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
+document.documentElement.dataset.theme=t;})();</script>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../pygments.css">
+</head>
+<body>
+<div class="page">
+<aside class="sidebar">
+  <p class="book-title">mini-swe-agent<br>源码教程</p>
+  <p class="book-sub">基于 v2.4.6 · 12 章</p>
+  <nav><a href="../index.html">首页</a>
+<a href="../modules/m01-overview.html"><span class="no">M01</span>概览</a>
+<a href="../modules/m02-package-map.html"><span class="no">M02</span>包地图</a>
+<a href="../modules/m03-agent-loop.html" class="active"><span class="no">M03</span>Agent 循环</a>
+<a href="../modules/m04-messages-templates.html"><span class="no">M04</span>消息与模板</a>
+<a href="../modules/m05-model-call.html"><span class="no">M05</span>模型调用</a>
+<a href="../modules/m06-actions.html"><span class="no">M06</span>动作解析</a>
+<a href="../modules/m07-environments.html"><span class="no">M07</span>环境</a>
+<a href="../modules/m08-interactive.html"><span class="no">M08</span>交互模式</a>
+<a href="../modules/m09-config.html"><span class="no">M09</span>配置系统</a>
+<a href="../modules/m10-trajectory.html"><span class="no">M10</span>轨迹持久化</a>
+<a href="../modules/m11-swebench.html"><span class="no">M11</span>基准测试</a>
+<a href="../modules/m12-extending.html"><span class="no">M12</span>扩展指南</a></nav>
+</aside>
+<div class="main">
+  <div class="topbar"><button class="theme-toggle" onclick="toggleTheme()">切换明暗</button></div>
+  <div class="content">
+<h1>Agent 循环 —— 异常是唯一的控制流</h1>
+<p class="meta">约 25 分钟读完</p><blockquote>
+<p>本章源文件：<code>src/minisweagent/agents/default.py</code>（190 行）、<code>src/minisweagent/exceptions.py</code>（26 行）。官方控制流图见 <code>docs/advanced/control_flow.md</code>。</p>
+</blockquote>
+<h2>一、引子：一百行怎么转起来</h2>
+<p><code>DefaultAgent</code> 是全书的主角。它的全部工作可以用一句话概括：<strong>反复问模型、执行命令，直到某条消息说"停"</strong>。但魔鬼在细节里：停下来的方式有五种，格式错误要计费，每一步都要落盘，而这些全塞在不到两百行里。读完你应该能回答三个问题：</p>
+<ol>
+<li>这个 <code>while True</code> 循环到底有几种退出路径？分别由谁触发？</li>
+<li>为什么"提交任务""超出限额""格式错误"都是<strong>异常</strong>，而不是返回码？</li>
+<li>模型输出格式错误时 API 已经计费了，这笔钱记在哪里？</li>
+</ol>
+<h2>二、先把词对齐</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>术语</th>
+<th>含义</th>
+<th>代码落点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>step</td>
+<td>一次 query + execute_actions</td>
+<td><code>default.py:126-128</code></td>
+</tr>
+<tr>
+<td>query</td>
+<td>问一次模型（含限额检查）</td>
+<td><code>default.py:130-152</code></td>
+</tr>
+<tr>
+<td>action</td>
+<td>待执行的命令，<code>{"command": ...}</code></td>
+<td>由模型类解析产出</td>
+</tr>
+<tr>
+<td>observation</td>
+<td>执行结果格式化后的消息</td>
+<td><code>default.py:157</code></td>
+</tr>
+<tr>
+<td>exit 消息</td>
+<td><code>role="exit"</code> 的特殊消息，循环的停止哨兵</td>
+<td><code>default.py:122</code></td>
+</tr>
+<tr>
+<td>InterruptAgentFlow</td>
+<td>所有控制流异常的基类，携带要追加的消息</td>
+<td><code>exceptions.py:1-6</code></td>
+</tr>
+</tbody>
+</table></div>
+<h2>三、全景：四层调用，一个哨兵</h2>
+<div class="codehilite"><pre><span></span><code>run(task)                          default.py:88
+│  初始化 system + user 两条消息      :92-95
+│
+└─ while True:                     :96
+   │
+   ├─ step()                       :126  ← 一行：execute_actions(query())
+   │   ├─ query()                  :130
+   │   │   ├─ 限额闸门（步数/成本/时间）:132-147
+   │   │   ├─ model.query(messages) :149  → 助手消息（含 actions）
+   │   │   └─ 计费 + 追加消息        :150-151
+   │   └─ execute_actions(msg)     :154
+   │       ├─ env.execute(action)  :156  （逐条；可能抛 Submitted）
+   │       └─ 格式化观察 + 追加      :157
+   │
+   ├─ except FormatError           :100  → 补计费，追加纠错消息
+   ├─ except InterruptAgentFlow    :115  → 追加异常携带的消息
+   ├─ except Exception             :117  → 记录后 re-raise
+   ├─ finally: save()              :120  → 每步都落盘
+   │
+   └─ messages[-1].role == "exit"? :122  → 是：break；否：下一轮
+</code></pre></div>
+
+<p>注意一个容易看错的结构：<strong>except 分支并不直接退出循环</strong>。它们只是往 <code>messages</code> 里追加消息，然后统一走到 122 行检查最后一条消息的 role。退出不退，只看哨兵。</p>
+<h2>四、配置与状态：先看清手里有什么牌</h2>
+<h3>4.1 AgentConfig（19-35 行）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>字段</th>
+<th>默认</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>system_template</code></td>
+<td>必填</td>
+<td>系统消息模板（第一条消息）</td>
+</tr>
+<tr>
+<td><code>instance_template</code></td>
+<td>必填</td>
+<td>任务消息模板（第二条消息）</td>
+</tr>
+<tr>
+<td><code>step_limit</code></td>
+<td><code>0</code></td>
+<td>最大步数，0 = 不限</td>
+</tr>
+<tr>
+<td><code>cost_limit</code></td>
+<td><code>3.0</code></td>
+<td>成本上限（美元），<strong>超过</strong>才停</td>
+</tr>
+<tr>
+<td><code>wall_time_limit_seconds</code></td>
+<td><code>0</code></td>
+<td>墙钟时间上限，0 = 不限</td>
+</tr>
+<tr>
+<td><code>max_consecutive_format_errors</code></td>
+<td><code>3</code></td>
+<td>连续格式错误上限，0 = 不限</td>
+</tr>
+<tr>
+<td><code>output_path</code></td>
+<td><code>None</code></td>
+<td>轨迹落盘路径</td>
+</tr>
+</tbody>
+</table></div>
+<p>两个模板必填、其余皆有限额——配置的形状直接反映了 agent 的职责：<strong>给提示词、看住资源、别的不多管</strong>。</p>
+<h3>4.2 实例状态（39-50 行）</h3>
+<p><code>__init__</code> 收下 model 与 env 两个组件，然后初始化六个可变状态：</p>
+<div class="codehilite"><pre><span></span><code><span class="bp">self</span><span class="o">.</span><span class="n">messages</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>            <span class="c1"># :42  线性历史，只增不减</span>
+<span class="bp">self</span><span class="o">.</span><span class="n">cost</span> <span class="o">=</span> <span class="mf">0.0</span>                           <span class="c1"># :47  本实例累计成本</span>
+<span class="bp">self</span><span class="o">.</span><span class="n">n_calls</span> <span class="o">=</span> <span class="mi">0</span>                          <span class="c1"># :48  模型调用次数</span>
+<span class="bp">self</span><span class="o">.</span><span class="n">n_consecutive_format_errors</span> <span class="o">=</span> <span class="mi">0</span>      <span class="c1"># :49  连续格式错误计数</span>
+<span class="bp">self</span><span class="o">.</span><span class="n">_start_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>            <span class="c1"># :50  墙钟起点</span>
+</code></pre></div>
+
+<p><code>config_class</code> 参数（39 行）是扩展点：子类传入自己的配置类即可加字段（m08 的 <code>InteractiveAgentConfig</code> 就是这么做的）。</p>
+<h2>五、run()：逐段精读（88-124 行）</h2>
+<h3>5.1 开场两条消息（90-95 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="bp">self</span><span class="o">.</span><span class="n">extra_template_vars</span> <span class="o">|=</span> <span class="p">{</span><span class="s2">"task"</span><span class="p">:</span> <span class="n">task</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">}</span>     <span class="c1"># :90</span>
+<span class="bp">self</span><span class="o">.</span><span class="n">messages</span> <span class="o">=</span> <span class="p">[]</span>                                       <span class="c1"># :91</span>
+<span class="bp">self</span><span class="o">.</span><span class="n">add_messages</span><span class="p">(</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">format_message</span><span class="p">(</span><span class="n">role</span><span class="o">=</span><span class="s2">"system"</span><span class="p">,</span> <span class="n">content</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_render_template</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">system_template</span><span class="p">)),</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">format_message</span><span class="p">(</span><span class="n">role</span><span class="o">=</span><span class="s2">"user"</span><span class="p">,</span> <span class="n">content</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_render_template</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">instance_template</span><span class="p">)),</span>
+<span class="p">)</span>                                                        <span class="c1"># :92-95</span>
+</code></pre></div>
+
+<p>三个细节：</p>
+<ul>
+<li><strong>每次 run 清空历史</strong>（91 行）——同一个 agent 对象可以跑多个任务；</li>
+<li>任务文本不进消息模板硬编码，而是进 <code>extra_template_vars</code>，由 Jinja 的 <code>{{task}}</code> 渲染（m04）；</li>
+<li>消息要经过 <code>model.format_message</code> 包装——因为不同 API 的消息格式不同（chat completions vs Responses API），格式化的职责在模型侧（v2 的职责转移，<code>v2_migration.md:166</code>）。</li>
+</ul>
+<h3>5.2 异常处理矩阵（96-121 行）</h3>
+<p><code>while True</code> 里的 try/except 是本章的核心。四个分支各司其职：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>分支</th>
+<th>行号</th>
+<th>处理</th>
+<th>之后</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>正常 step</td>
+<td>98-99</td>
+<td>清零连续格式错误计数</td>
+<td>检查哨兵</td>
+</tr>
+<tr>
+<td><code>FormatError</code></td>
+<td>100-114</td>
+<td>补计费 + 计数 + 追加纠错消息（或追加 exit）</td>
+<td>检查哨兵</td>
+</tr>
+<tr>
+<td><code>InterruptAgentFlow</code></td>
+<td>115-116</td>
+<td>追加异常携带的消息</td>
+<td>检查哨兵</td>
+</tr>
+<tr>
+<td>其他 <code>Exception</code></td>
+<td>117-119</td>
+<td><code>handle_uncaught_exception</code> 记录 exit 消息后 <strong>re-raise</strong></td>
+<td>进程崩溃，但轨迹已保存</td>
+</tr>
+<tr>
+<td><code>finally</code></td>
+<td>120-121</td>
+<td><code>self.save(self.config.output_path)</code></td>
+<td>每步必执行</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>为什么用异常而不是返回码？</strong> 官方文档的回答（<code>control_flow.md:123</code>）："Using exceptions for the control flow is a lot easier than passing around flags and states, especially when extending or subclassing the agent." 看调用栈就明白了：<code>Submitted</code> 在 <code>env.execute</code> 里抛出（<code>local.py:50</code>），隔着 <code>execute_actions</code> → <code>step</code> 两层直接飞到 <code>run</code> 的 except。如果用返回码，每一层都要检查、透传"是否该停"的标志——两层还好，扩展成五层就是灾难。异常让"深处产生的停止意图"零成本地抵达唯一该处理它的地方。</p>
+<h3>5.3 FormatError 的特殊账本（100-114 行）</h3>
+<p>这是全章最微妙的一段：</p>
+<div class="codehilite"><pre><span></span><code><span class="k">except</span> <span class="n">FormatError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+    <span class="c1"># The call was billed before parsing failed, so query() never got to charge it.</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">cost</span> <span class="o">+=</span> <span class="n">e</span><span class="o">.</span><span class="n">messages</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"extra"</span><span class="p">,</span> <span class="p">{})</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"cost"</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">)</span>   <span class="c1"># :102</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">n_consecutive_format_errors</span> <span class="o">+=</span> <span class="mi">1</span>                          <span class="c1"># :103</span>
+    <span class="k">if</span> <span class="mi">0</span> <span class="o">&lt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">max_consecutive_format_errors</span> <span class="o">&lt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_consecutive_format_errors</span><span class="p">:</span>  <span class="c1"># :104</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">add_messages</span><span class="p">(</span><span class="o">*</span><span class="n">e</span><span class="o">.</span><span class="n">messages</span><span class="p">,</span> <span class="p">{</span><span class="s2">"role"</span><span class="p">:</span> <span class="s2">"exit"</span><span class="p">,</span> <span class="o">...</span> <span class="s2">"RepeatedFormatError"</span> <span class="o">...</span><span class="p">})</span>    <span class="c1"># :105-112</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">add_messages</span><span class="p">(</span><span class="o">*</span><span class="n">e</span><span class="o">.</span><span class="n">messages</span><span class="p">)</span>                             <span class="c1"># :114</span>
+</code></pre></div>
+
+<ul>
+<li><strong>102 行的注释揭示了一个契约</strong>：模型类在解析失败时，必须把已产生的成本塞进 FormatError 的消息里（<code>litellm_model.py:87-98</code> 履行它），因为正常路径上 <code>query()</code> 的 150 行计费没机会执行。钱花了就得记账，哪怕输出是废的。</li>
+<li>连续计数在<strong>任何干净 step 后清零</strong>（99 行）——惩罚的是"屡教不改"，不是"偶尔犯错"。</li>
+<li>达到上限时追加 <code>RepeatedFormatError</code> 的 exit 消息；没达到就只追加纠错消息（role=user），下一轮模型会读到纠错指引（模板见 m04）。</li>
+</ul>
+<h3>5.4 哨兵与返回值（122-124 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">messages</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"role"</span><span class="p">)</span> <span class="o">==</span> <span class="s2">"exit"</span><span class="p">:</span>   <span class="c1"># :122</span>
+    <span class="k">break</span>
+<span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">messages</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"extra"</span><span class="p">,</span> <span class="p">{})</span>     <span class="c1"># :124</span>
+</code></pre></div>
+
+<p>循环唯一的退出条件：<strong>最后一条消息是 exit</strong>。返回值是它的 <code>extra</code>——按惯例含 <code>exit_status</code> 与 <code>submission</code> 两个键。这就是 Agent 协议里 <code>run() -&gt; dict</code> 的全部含义（<code>__init__.py:78</code>）。</p>
+<h2>六、step / query / execute_actions：三层的分工</h2>
+<h3>6.1 step：一行（126-128 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">step</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Query the LM, execute actions."""</span>
+    <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">execute_actions</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">query</span><span class="p">())</span>
+</code></pre></div>
+
+<p>一行函数为什么存在？因为它是<strong>子类挂插头的标准位置</strong>：<code>InteractiveAgent</code> 覆写它来捕获 Ctrl-C（<code>interactive.py:109</code>），<code>ProgressTrackingAgent</code> 覆写它来报进度（<code>run/benchmarks/utils/common.py:15-17</code>）。覆写 step 不需要理解 run 的异常矩阵。</p>
+<h3>6.2 query：三道闸门 + 计费（130-152 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="k">if</span> <span class="mi">0</span> <span class="o">&lt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">step_limit</span> <span class="o">&lt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_calls</span> <span class="ow">or</span> <span class="mi">0</span> <span class="o">&lt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">cost_limit</span> <span class="o">&lt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cost</span><span class="p">:</span>  <span class="c1"># :132</span>
+    <span class="k">raise</span> <span class="n">LimitsExceeded</span><span class="p">({</span><span class="o">...</span> <span class="s2">"exit_status"</span><span class="p">:</span> <span class="s2">"LimitsExceeded"</span> <span class="o">...</span><span class="p">})</span>                        <span class="c1"># :133-139</span>
+<span class="k">if</span> <span class="mi">0</span> <span class="o">&lt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">wall_time_limit_seconds</span> <span class="o">&lt;=</span> <span class="nb">int</span><span class="p">(</span><span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">_start_time</span><span class="p">):</span>         <span class="c1"># :140</span>
+    <span class="k">raise</span> <span class="n">TimeExceeded</span><span class="p">({</span><span class="o">...</span><span class="p">})</span>                                                              <span class="c1"># :141-147</span>
+<span class="bp">self</span><span class="o">.</span><span class="n">n_calls</span> <span class="o">+=</span> <span class="mi">1</span>                                                                          <span class="c1"># :148</span>
+<span class="n">message</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">messages</span><span class="p">)</span>                                                  <span class="c1"># :149</span>
+<span class="bp">self</span><span class="o">.</span><span class="n">cost</span> <span class="o">+=</span> <span class="n">message</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"extra"</span><span class="p">,</span> <span class="p">{})</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"cost"</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">)</span>                                     <span class="c1"># :150</span>
+</code></pre></div>
+
+<ul>
+<li>限额检查在<strong>调用前</strong>：<code>0 &lt; limit &lt;= current</code> 的写法让 <code>0</code> 天然表示"不限"；</li>
+<li>注意 <code>cost_limit</code> 的语义是"超过才停"（配置 docstring，28-29 行）：本次调用前成本还没超就允许花，花超了下一轮才拦。所以实际成本可能略微越限——这是刻意的简单化；</li>
+<li><code>TimeExceeded</code> 继承 <code>LimitsExceeded</code>（<code>exceptions.py:17</code>），但在交互 agent 里待遇不同：步数/成本限额可以问用户提额，墙钟不行（<code>interactive.py:75-79</code>，m08 细讲）；</li>
+<li>149 行把<strong>整个 messages 列表</strong>传给模型——线性历史的直接体现：不剪枝、不摘要、不挑选。</li>
+</ul>
+<h3>6.3 execute_actions：两行（154-157 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="n">outputs</span> <span class="o">=</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">env</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">action</span><span class="p">)</span> <span class="k">for</span> <span class="n">action</span> <span class="ow">in</span> <span class="n">message</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"extra"</span><span class="p">,</span> <span class="p">{})</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"actions"</span><span class="p">,</span> <span class="p">[])]</span>  <span class="c1"># :156</span>
+<span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">add_messages</span><span class="p">(</span><span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">format_observation_messages</span><span class="p">(</span><span class="n">message</span><span class="p">,</span> <span class="n">outputs</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_template_vars</span><span class="p">()))</span>  <span class="c1"># :157</span>
+</code></pre></div>
+
+<ul>
+<li>动作列表从模型消息的 <code>extra.actions</code> 里取——<strong>agent 自己不懂工具调用格式</strong>，解析是模型类的事（m06）；</li>
+<li>逐条顺序执行；任何一条抛出 <code>Submitted</code>，后面的动作不再执行（列表推导中断）；</li>
+<li>观察格式化又交回模型类：toolcall 路线要生成 <code>role="tool"</code> 且带 <code>tool_call_id</code> 的消息，textbased 路线生成 <code>role="user"</code> 消息——agent 无需知道差别。</li>
+</ul>
+<h2>七、异常家族：26 行的控制流词汇表</h2>
+<p><code>exceptions.py</code> 全文 26 行，继承树如下：</p>
+<div class="codehilite"><pre><span></span><code>InterruptAgentFlow                    :1   基类：__init__ 收下 *messages 存到 self.messages
+├── Submitted                         :9   任务完成（环境抛出）
+├── LimitsExceeded                    :13  步数/成本超限（agent.query 抛出）
+│   └── TimeExceeded                  :17  墙钟超限（agent.query 抛出）
+├── UserInterruption                  :21  用户插话/拒绝（交互 agent 抛出）
+└── FormatError                       :25  模型输出不合预期（模型类抛出）
+</code></pre></div>
+
+<p>基类只做一件事（4-6 行）：<code>self.messages = messages</code>。<strong>异常即消息信封</strong>——抛出者把要追加进轨迹的消息装进异常，捕获者（<code>run</code> 的 115-116 行）原样倒出。谁抛、谁捕、带什么消息：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>异常</th>
+<th>抛出者</th>
+<th>携带消息的 role</th>
+<th>循环是否停</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Submitted</code></td>
+<td><code>env._check_finished</code>（<code>local.py:50-56</code>）</td>
+<td><code>exit</code>（含 submission）</td>
+<td>停</td>
+</tr>
+<tr>
+<td><code>LimitsExceeded</code> / <code>TimeExceeded</code></td>
+<td><code>agent.query</code>（<code>default.py:133/141</code>）</td>
+<td><code>exit</code></td>
+<td>停</td>
+</tr>
+<tr>
+<td><code>FormatError</code></td>
+<td>模型类解析器（<code>actions_toolcall.py:41/66</code>）</td>
+<td><code>user</code>（纠错指引）</td>
+<td>不停（除非连续超限）</td>
+</tr>
+<tr>
+<td><code>UserInterruption</code></td>
+<td>交互 agent（<code>interactive.py:41</code>）</td>
+<td><code>user</code>（用户的话）</td>
+<td>不停</td>
+</tr>
+<tr>
+<td>其他 Exception</td>
+<td>任何地方</td>
+<td><code>exit</code>（记录 traceback）</td>
+<td><strong>re-raise，进程退出</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>最后一行值得停顿：<code>handle_uncaught_exception</code>（74-86 行）先把异常名、字符串、完整 traceback 包装成 exit 消息追加，然后 117-119 行 re-raise。配合 finally 的 save（120-121 行），<strong>即使 agent 崩溃，轨迹也完整落盘且标明了死因</strong>——调试线上事故时这是救命的性质。</p>
+<h2>八、贯穿全章的哲学：只增不减</h2>
+<p>数一数 <code>self.messages</code> 被写的地方：初始化清空（91 行）、<code>add_messages</code> 追加（69-72 行）。没有删除、没有修改、没有压缩。整个类里<strong>唯一</strong>的"状态机"就是 122 行那个 role 检查。</p>
+<p>这就是 m01 说的线性历史在代码层面的样子。对比 pi-agent 等系统的上下文压缩、历史剪枝，mini 的立场是：<strong>那些是模型能力不足时代的补丁；上下文超了就让 API 报错（<code>ContextWindowExceededError</code> 在 abort 列表里，<code>litellm_model.py:54</code>），把问题暴露给用户而不是悄悄修剪。</strong> 简单本身就是一种功能。</p>
+<h2>九、小结</h2>
+<ul>
+<li>循环四件套：<code>run</code>（异常矩阵 + 哨兵）、<code>step</code>（一行，子类插头）、<code>query</code>（三道闸门 + 计费）、<code>execute_actions</code>（执行 + 格式化观察）。</li>
+<li>退出只看一件事：<code>messages[-1].role == "exit"</code>。五种死法：Submitted、LimitsExceeded、TimeExceeded、RepeatedFormatError、未捕获异常（后者 re-raise）。</li>
+<li>异常是消息信封：<code>InterruptAgentFlow.messages</code> 携带要追加的消息，深层抛出、run 层统一追加。</li>
+<li>FormatError 必须携带成本（模型侧契约），连续 3 次才判死刑；每步 finally 落盘，崩溃也有完整轨迹。</li>
+<li>下一章看消息本身：模板变量从哪里来，<code>extra</code> 里装了什么。</li>
+</ul>
+<div class="pager"><a href="m02-package-map.html"><span class="dir">← 上一章</span>包地图 —— 五个目录，三个协议</a><a class="next" href="m04-messages-templates.html"><span class="dir">下一章 →</span>消息与模板 —— 一切皆 dict，渲染靠 Jinja</a></div>
+  </div>
+</div>
+</div>
+<script>function toggleTheme(){var h=document.documentElement;
+var t=h.dataset.theme==="dark"?"light":"dark";h.dataset.theme=t;localStorage.setItem("theme",t);}</script>
+</body>
+</html>

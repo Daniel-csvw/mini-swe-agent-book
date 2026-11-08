@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>消息与模板 —— 一切皆 dict，渲染靠 Jinja | mini-swe-agent 源码教程</title>
+<script>(function(){var t=localStorage.getItem("theme");
+if(!t){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
+document.documentElement.dataset.theme=t;})();</script>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../pygments.css">
+</head>
+<body>
+<div class="page">
+<aside class="sidebar">
+  <p class="book-title">mini-swe-agent<br>源码教程</p>
+  <p class="book-sub">基于 v2.4.6 · 12 章</p>
+  <nav><a href="../index.html">首页</a>
+<a href="../modules/m01-overview.html"><span class="no">M01</span>概览</a>
+<a href="../modules/m02-package-map.html"><span class="no">M02</span>包地图</a>
+<a href="../modules/m03-agent-loop.html"><span class="no">M03</span>Agent 循环</a>
+<a href="../modules/m04-messages-templates.html" class="active"><span class="no">M04</span>消息与模板</a>
+<a href="../modules/m05-model-call.html"><span class="no">M05</span>模型调用</a>
+<a href="../modules/m06-actions.html"><span class="no">M06</span>动作解析</a>
+<a href="../modules/m07-environments.html"><span class="no">M07</span>环境</a>
+<a href="../modules/m08-interactive.html"><span class="no">M08</span>交互模式</a>
+<a href="../modules/m09-config.html"><span class="no">M09</span>配置系统</a>
+<a href="../modules/m10-trajectory.html"><span class="no">M10</span>轨迹持久化</a>
+<a href="../modules/m11-swebench.html"><span class="no">M11</span>基准测试</a>
+<a href="../modules/m12-extending.html"><span class="no">M12</span>扩展指南</a></nav>
+</aside>
+<div class="main">
+  <div class="topbar"><button class="theme-toggle" onclick="toggleTheme()">切换明暗</button></div>
+  <div class="content">
+<h1>消息与模板 —— 一切皆 dict，渲染靠 Jinja</h1>
+<p class="meta">约 20 分钟读完</p><blockquote>
+<p>本章源文件：<code>src/minisweagent/agents/default.py:52-72</code>、<code>src/minisweagent/utils/serialize.py</code>、<code>src/minisweagent/config/mini.yaml</code>、<code>src/minisweagent/config/default.yaml</code>。</p>
+</blockquote>
+<h2>一、引子：模型看到的第一个字是怎么来的</h2>
+<p>agent 发给模型的每条消息都是普通的 Python dict；提示词不是写在代码里的字符串，而是 YAML 里的 Jinja 模板。这一章回答"模型到底看到了什么"。读完你应该能回答三个问题：</p>
+<ol>
+<li>消息里的 <code>extra</code> 字段是什么？为什么发给 API 前要剥掉它？</li>
+<li>模板里的 <code>{{task}}</code>、<code>{{system}}</code>、<code>{{model_cost}}</code> 分别从哪来？合并顺序是什么？</li>
+<li>命令输出太长时，模型看到的是什么？</li>
+</ol>
+<h2>二、先把词对齐</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>术语</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>system / instance 模板</td>
+<td>第一条（系统人设）与第二条（任务描述）消息的模板</td>
+</tr>
+<tr>
+<td>observation 模板</td>
+<td>把执行结果渲染成消息的模板</td>
+</tr>
+<tr>
+<td>format_error 模板</td>
+<td>解析失败时渲染纠错指引的模板</td>
+</tr>
+<tr>
+<td>模板变量（template vars）</td>
+<td>渲染时可用的全部键值，来自六层合并</td>
+</tr>
+<tr>
+<td><code>extra</code></td>
+<td>mini 附加在原生消息上的元数据袋，不进 API</td>
+</tr>
+</tbody>
+</table></div>
+<h2>三、全景：一条消息的生命周期</h2>
+<div class="codehilite"><pre><span></span><code>YAML 模板（config/mini.yaml）
+   │  Jinja 渲染（StrictUndefined）         default.py:66-67
+   │  变量 = 六层递归合并                    default.py:52-64
+   ▼
+model.format_message(role=..., content=...)  litellm_model.py:137-138
+   │  （可选）多模态展开
+   ▼
+messages 列表（线性历史，只增不减）           default.py:42
+   │
+   ├─→ 落盘：原样进 traj.json                default.py:177
+   └─→ 发 API：剥掉 extra + 兼容性重排        litellm_model.py:76-79
+</code></pre></div>
+
+<p><strong>同一份消息，两个视图</strong>：轨迹里是全量（含 extra），API 请求里是净版。v2 的设计是"以模型原生输出为基底，只加 <code>extra</code>"（<code>v2_migration.md:122</code>）——所以消息结构随模型/API 不同而不同，解析轨迹时要按模型类型适配（<code>v2_migration.md:127-130</code>）。</p>
+<h2>四、消息的结构：原生格式 + extra 袋</h2>
+<h3>4.1 五种 role</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>role</th>
+<th>谁产生</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>system</code></td>
+<td>run 开场</td>
+<td>渲染后的 system_template</td>
+</tr>
+<tr>
+<td><code>user</code></td>
+<td>run 开场 / 纠错 / 用户插话 / textbased 观察</td>
+<td>任务、指引、命令输出</td>
+</tr>
+<tr>
+<td><code>assistant</code></td>
+<td>模型返回</td>
+<td>推理文本 + tool_calls（原生格式）</td>
+</tr>
+<tr>
+<td><code>tool</code></td>
+<td>toolcall 路线的观察</td>
+<td>命令输出，带 <code>tool_call_id</code>（<code>actions_toolcall.py:105-107</code>）</td>
+</tr>
+<tr>
+<td><code>exit</code></td>
+<td>各控制流异常</td>
+<td>停止哨兵，<code>extra</code> 含 <code>exit_status</code>/<code>submission</code></td>
+</tr>
+</tbody>
+</table></div>
+<p><code>exit</code> 是 mini 自创的 role，<strong>永远不会发给模型</strong>——循环在 122 行（<code>default.py</code>）看到它就 break 了。</p>
+<h3>4.2 extra 里装什么</h3>
+<p>以模型返回的助手消息为例（<code>litellm_model.py:100-105</code>）：</p>
+<div class="codehilite"><pre><span></span><code><span class="n">message</span><span class="p">[</span><span class="s2">"extra"</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">"actions"</span><span class="p">:</span> <span class="n">actions</span><span class="p">,</span>                    <span class="c1"># 解析好的动作列表，agent 只认这个</span>
+    <span class="s2">"response"</span><span class="p">:</span> <span class="n">response</span><span class="o">.</span><span class="n">model_dump</span><span class="p">(),</span>     <span class="c1"># 完整原始响应，调试/审计用</span>
+    <span class="o">**</span><span class="n">cost_output</span><span class="p">,</span>                         <span class="c1"># {"cost": ...}</span>
+    <span class="s2">"timestamp"</span><span class="p">:</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">(),</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>观察消息的 extra（<code>actions_toolcall.py:97-103</code>）：<code>raw_output</code>（未截断的原始输出）、<code>returncode</code>、<code>timestamp</code>、<code>exception_info</code>。<strong>模板渲染出的是给模型看的精简版，extra 里留的是给人事后看的完整版</strong>——比如输出被截断时，模型看到 head/tail，轨迹里的 <code>raw_output</code> 仍是全量。</p>
+<p>发 API 前的剥离只有一行（<code>litellm_model.py:77</code>）：</p>
+<div class="codehilite"><pre><span></span><code><span class="n">prepared</span> <span class="o">=</span> <span class="p">[{</span><span class="n">k</span><span class="p">:</span> <span class="n">v</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">msg</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">k</span> <span class="o">!=</span> <span class="s2">"extra"</span><span class="p">}</span> <span class="k">for</span> <span class="n">msg</span> <span class="ow">in</span> <span class="n">messages</span><span class="p">]</span>
+</code></pre></div>
+
+<h2>五、模板变量：六层合并，后者为王</h2>
+<p><code>get_template_vars</code>（<code>default.py:52-64</code>）是全书最重要的"数据从哪来"答案：</p>
+<div class="codehilite"><pre><span></span><code><span class="k">return</span> <span class="n">recursive_merge</span><span class="p">(</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">model_dump</span><span class="p">(),</span>        <span class="c1"># 1. agent 配置（step_limit、cost_limit...）</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">env</span><span class="o">.</span><span class="n">get_template_vars</span><span class="p">(),</span>    <span class="c1"># 2. 环境贡献</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">get_template_vars</span><span class="p">(),</span>  <span class="c1"># 3. 模型贡献</span>
+    <span class="p">{</span>                                <span class="c1"># 4. 运行时统计</span>
+        <span class="s2">"n_model_calls"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_calls</span><span class="p">,</span>
+        <span class="s2">"model_cost"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">cost</span><span class="p">,</span>
+        <span class="s2">"elapsed_seconds"</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">_start_time</span><span class="p">),</span>
+    <span class="p">},</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">extra_template_vars</span><span class="p">,</span>        <span class="c1"># 5. run(task, **kwargs) 传入</span>
+    <span class="n">kwargs</span><span class="p">,</span>                          <span class="c1"># 6. 本次调用临时传入</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<p><strong>顺序即优先级</strong>：越靠后越优先。所以 <code>run("修 bug", system="Linux")</code> 能覆盖环境探测到的同名变量。</p>
+<p>各方贡献的内容：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>来源</th>
+<th>变量</th>
+<th>代码</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>agent 配置</td>
+<td><code>system_template</code>、<code>step_limit</code>、<code>cost_limit</code> 等全部配置键</td>
+<td><code>default.py:54</code></td>
+</tr>
+<tr>
+<td>LocalEnvironment</td>
+<td>配置键 + <code>platform.uname()</code>（<code>system</code>/<code>release</code>/<code>version</code>/<code>machine</code>...）+ <strong>整个 os.environ</strong></td>
+<td><code>local.py:58-59</code></td>
+</tr>
+<tr>
+<td>DockerEnvironment</td>
+<td>配置键 + <code>platform.uname()</code>（<strong>不含</strong>宿主环境变量）</td>
+<td><code>docker.py:61-62</code></td>
+</tr>
+<tr>
+<td>模型</td>
+<td>模型配置键（<code>model_name</code>、<code>model_kwargs</code>...）</td>
+<td><code>litellm_model.py:153-154</code></td>
+</tr>
+<tr>
+<td>运行时</td>
+<td><code>n_model_calls</code>、<code>model_cost</code>、<code>elapsed_seconds</code></td>
+<td><code>default.py:57-61</code></td>
+</tr>
+<tr>
+<td>run 调用</td>
+<td><code>task</code> + 任意 kwargs</td>
+<td><code>default.py:90</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>两个值得注意的点：</p>
+<ul>
+<li>本地环境的模板里可以写 <code>{{HOME}}</code>、<code>{{PATH}}</code>——因为 <code>os.environ</code> 整个倒进了变量池（<code>local.py:59</code>）。Docker 环境刻意不倒，避免宿主信息泄漏进容器任务的提示词。</li>
+<li><code>mini.yaml:51-53</code> 的 <code>&lt;system_information&gt;{{system}} {{release}} {{version}} {{machine}}&lt;/system_information&gt;</code> 就是靠 uname 那层填上的——模型由此知道自己在什么操作系统上，模板甚至按 <code>system == "Darwin"</code> 切换 sed 语法教学（<code>mini.yaml:69-73</code>）。</li>
+</ul>
+<h3>5.1 recursive_merge：合并的具体规则</h3>
+<p><code>utils/serialize.py:6-29</code>，规则三条：</p>
+<ol>
+<li><code>None</code> 字典跳过（17-18 行）；</li>
+<li>值为 <code>UNSET</code>（<code>serialize.py:3</code> 定义的模块级哨兵对象）的键跳过（20-21 行）——CLI 未设置的选项靠它不覆盖 YAML（m09）；</li>
+<li>两边都是 dict 就递归合并（22-23 行），否则后者直接覆盖（27-28 行）。</li>
+</ol>
+<p>注意<strong>列表不合并，只覆盖</strong>——<code>whitelist_actions</code> 这类列表配置在 YAML 里写了就是整组替换。</p>
+<h3>5.2 StrictUndefined：写错变量名立刻炸</h3>
+<p><code>_render_template</code>（<code>default.py:66-67</code>）：</p>
+<div class="codehilite"><pre><span></span><code><span class="k">return</span> <span class="n">Template</span><span class="p">(</span><span class="n">template</span><span class="p">,</span> <span class="n">undefined</span><span class="o">=</span><span class="n">StrictUndefined</span><span class="p">)</span><span class="o">.</span><span class="n">render</span><span class="p">(</span><span class="o">**</span><span class="bp">self</span><span class="o">.</span><span class="n">get_template_vars</span><span class="p">())</span>
+</code></pre></div>
+
+<p>Jinja 默认对未定义变量渲染成空字符串；<code>StrictUndefined</code> 则直接抛 <code>UndefinedError</code>。这是刻选择：<strong>提示词里悄悄少一块比响亮地报错危险得多</strong>。观察模板、错误模板同样全部用 StrictUndefined（<code>actions_toolcall.py:44/69/92</code>、<code>actions_text.py:30/53</code>）。</p>
+<h2>六、两份内置模板：toolcall 与 textbased 的对照</h2>
+<p>配置目录里 <code>mini.yaml</code>（CLI 默认，toolcall 路线）与 <code>default.yaml</code>（hello_world 默认，textbased 路线）是同一份提示词的两种方言。</p>
+<h3>6.1 system_template：一句话 vs 一段格式法</h3>
+<p><code>mini.yaml:2-3</code> 的 system 只有一句 "You are a helpful assistant that can interact with a computer."——格式约束交给原生 tool call schema 强制。</p>
+<p><code>default.yaml:2-17</code> 的 system 则长篇规定格式：必须恰好一个 <code>```mswea_bash_command</code> 代码块、前面要有 THOUGHT 段、附带格式示例——因为 textbased 路线没有 API 层面的约束，只能靠提示词恳求模型守规矩。<strong>约束放在哪一层，是两条路线最本质的区别</strong>（m06 展开）。</p>
+<h3>6.2 instance_template：同构的五段式</h3>
+<p>两份的任务模板结构一致（<code>mini.yaml:4-100</code>）：</p>
+<ol>
+<li><code>Please solve this issue: {{task}}</code> —— 任务注入点；</li>
+<li>Recommended Workflow：读代码 → 写复现脚本 → 改源码 → 再跑脚本 → 测边界 → 提交（六步）；</li>
+<li>Command Execution Rules：子壳无持久状态的告知与绕过技巧；</li>
+<li><code>&lt;system_information&gt;</code>：uname 变量注入；</li>
+<li>Useful command examples：heredoc 写文件、sed 编辑、<code>nl -ba | sed -n</code> 看行——<strong>把工具用法写进提示词，而不是实现成工具</strong>，这是 m01 支柱一的具体手法。</li>
+</ol>
+<h3>6.3 observation_template：截断的艺术</h3>
+<p>命令输出可能无限长，模板负责截断。<code>mini.yaml:112-128</code>（toolcall 版，JSON 风格）：</p>
+<div class="codehilite"><pre><span></span><code>输出 &lt; 10000 字符：{"returncode": ..., "output": 全量}
+输出 ≥ 10000 字符：{"returncode": ..., "output_head": 前5000, "output_tail": 后5000,
+                    "elided_chars": N, "warning": "Output too long."}
+</code></pre></div>
+
+<p><code>default.yaml:114-141</code>（textbased 版，XML 风格）阈值相同，但多了给模型的建议：用 head/tail/sed 少看一点、grep 写精确一点、或者重定向到文件再搜（<code>default.yaml:124-130</code>）。</p>
+<p><strong>头尾保留、中间挖掉</strong>是刻意的：命令输出的关键信息（报错、总结）通常在两端。配合 extra 里的 <code>raw_output</code> 全量留存，模型看精简版、人看完整版，两不耽误。</p>
+<h3>6.4 format_error_template：区分"真错误"与"被截断"</h3>
+<p><code>mini.yaml:129-149</code> 有个精妙的分支（130 行）：</p>
+<div class="codehilite"><pre><span></span><code>{% if finish_reason == "length" or (finish_reason == "tool_calls" and not has_tool_calls) %}
+    → "你的输出被 token 上限截断了，说简短点，以一个 bash tool call 结尾"
+{% else %}
+    → 通用格式纠错 + 正确调用示例
+{% endif %}
+</code></pre></div>
+
+<p>模型没产出工具调用，<strong>不一定是格式错误，也可能是话太长被截了</strong>（<code>finish_reason="length"</code>）。两种情况的纠正策略完全不同：前者要教格式，后者要教模型长话短说。模板变量 <code>finish_reason</code> 由解析器传入（<code>actions_toolcall.py:31-37</code> 的 <code>template_kwargs</code>），Responses API 路线还专门做了状态映射（<code>actions_toolcall_response.py:45-55</code>）。</p>
+<h2>七、小结</h2>
+<ul>
+<li>消息 = 模型原生格式 + <code>extra</code> 元数据袋；轨迹存全量，API 发净版（剥 extra 仅一行）。</li>
+<li>模板变量六层合并：agent 配置 → 环境 → 模型 → 运行时统计 → run 传入 → 临时传入，后者为王；列表不合并只覆盖。</li>
+<li>一切模板用 <code>StrictUndefined</code>：变量写错立刻抛错，绝不悄悄渲染成空。</li>
+<li>观察截断策略：10000 字符阈值、头 5000 + 尾 5000、extra 留全量；格式错误模板区分截断与真错误。</li>
+<li>下一章看这些消息如何变成一次真实的 API 调用：重试、计费、缓存标记。</li>
+</ul>
+<div class="pager"><a href="m03-agent-loop.html"><span class="dir">← 上一章</span>Agent 循环 —— 异常是唯一的控制流</a><a class="next" href="m05-model-call.html"><span class="dir">下一章 →</span>模型调用 —— 重试、计费与格式错误契约</a></div>
+  </div>
+</div>
+</div>
+<script>function toggleTheme(){var h=document.documentElement;
+var t=h.dataset.theme==="dark"?"light":"dark";h.dataset.theme=t;localStorage.setItem("theme",t);}</script>
+</body>
+</html>

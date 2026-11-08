@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>扩展指南 —— 写你自己的 Model/Environment/Agent | mini-swe-agent 源码教程</title>
+<script>(function(){var t=localStorage.getItem("theme");
+if(!t){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
+document.documentElement.dataset.theme=t;})();</script>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../pygments.css">
+</head>
+<body>
+<div class="page">
+<aside class="sidebar">
+  <p class="book-title">mini-swe-agent<br>源码教程</p>
+  <p class="book-sub">基于 v2.4.6 · 12 章</p>
+  <nav><a href="../index.html">首页</a>
+<a href="../modules/m01-overview.html"><span class="no">M01</span>概览</a>
+<a href="../modules/m02-package-map.html"><span class="no">M02</span>包地图</a>
+<a href="../modules/m03-agent-loop.html"><span class="no">M03</span>Agent 循环</a>
+<a href="../modules/m04-messages-templates.html"><span class="no">M04</span>消息与模板</a>
+<a href="../modules/m05-model-call.html"><span class="no">M05</span>模型调用</a>
+<a href="../modules/m06-actions.html"><span class="no">M06</span>动作解析</a>
+<a href="../modules/m07-environments.html"><span class="no">M07</span>环境</a>
+<a href="../modules/m08-interactive.html"><span class="no">M08</span>交互模式</a>
+<a href="../modules/m09-config.html"><span class="no">M09</span>配置系统</a>
+<a href="../modules/m10-trajectory.html"><span class="no">M10</span>轨迹持久化</a>
+<a href="../modules/m11-swebench.html"><span class="no">M11</span>基准测试</a>
+<a href="../modules/m12-extending.html" class="active"><span class="no">M12</span>扩展指南</a></nav>
+</aside>
+<div class="main">
+  <div class="topbar"><button class="theme-toggle" onclick="toggleTheme()">切换明暗</button></div>
+  <div class="content">
+<h1>扩展指南 —— 写你自己的 Model/Environment/Agent</h1>
+<p class="meta">约 15 分钟读完</p><blockquote>
+<p>本章源文件：<code>src/minisweagent/__init__.py:43-80</code>、<code>models/test_models.py</code>、<code>models/extra/roulette.py</code>、<code>run/hello_world.py</code>、<code>docs/advanced/cookbook.md</code>。</p>
+</blockquote>
+<h2>一、引子：不改源码，能走多远</h2>
+<p>前十一章拆的都是"项目给了什么"。这一章反过来：你想加一个自定义工具、换一种执行后端、插一个校验钩子，需要动源码吗？答案是不需要——协议 + 鸭子类型 + 全路径类名 + config_class 模式，四件套把所有扩展点都留在了包外。读完你应该能回答三个问题：</p>
+<ol>
+<li>自定义一个 Model/Environment/Agent，最少要实现什么？有哪些容易漏掉的契约？</li>
+<li>测试里不想真调 API，官方给的确定性模型怎么用？</li>
+<li>自己的组件写在哪、怎么让 CLI 用上？</li>
+</ol>
+<h2>二、先把词对齐</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>术语</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>鸭子类型</td>
+<td>方法签名对上就能用，无需继承/注册（<code>v2_migration.md:176-179</code>）</td>
+</tr>
+<tr>
+<td>config_class 模式</td>
+<td>每个组件 <code>__init__(*, config_class=XxxConfig, **kwargs)</code>，子类换配置类即加字段</td>
+</tr>
+<tr>
+<td>全路径类名</td>
+<td><code>mypackage.mymodule.MyClass</code>，工厂直接 importlib 加载</td>
+</tr>
+<tr>
+<td>run 脚本</td>
+<td>组装三组件的入口，一切用例的起点（<code>AGENTS.md</code>）</td>
+</tr>
+</tbody>
+</table></div>
+<h2>三、全景：四个扩展层级</h2>
+<div class="codehilite"><pre><span></span><code>层级 0：改 YAML / 提示词          → 换性格、换格式约束（m04/m09）
+层级 1：换组件类（内置）          → --model-class litellm_textbased 等
+层级 2：写自己的组件类（包外）     → 本章主菜
+层级 3：写自己的 run 脚本         → 完全掌控组装与 CLI
+</code></pre></div>
+
+<h2>四、协议清单：最少实现什么</h2>
+<h3>4.1 自定义 Environment（最容易）</h3>
+<p>三个方法（<code>__init__.py:61-70</code>）。最小可用实现：</p>
+<div class="codehilite"><pre><span></span><code><span class="k">class</span><span class="w"> </span><span class="nc">MyEnvironment</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">config</span> <span class="o">=</span> <span class="n">MyConfig</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>  <span class="c1"># 任何带 model_dump() 的配置对象</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">execute</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">action</span><span class="p">:</span> <span class="nb">dict</span><span class="p">,</span> <span class="n">cwd</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">""</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+        <span class="c1"># 返回 {"output": str, "returncode": int, "exception_info": str}</span>
+        <span class="o">...</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_template_vars</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span> <span class="o">...</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">serialize</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span> <span class="o">...</span>
+</code></pre></div>
+
+<p><strong>容易漏掉的契约</strong>：</p>
+<ol>
+<li><strong>哨兵检查</strong>：想支持 <code>COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT</code> 提交，要复制 <code>_check_finished</code> 逻辑（<code>local.py:45-56</code>）——首行精确匹配 + 返回码 0 + 余行作 submission，抛 <code>Submitted</code>；</li>
+<li><strong>异常不出环境</strong>：执行失败包成 <code>returncode: -1</code> + <code>exception_info</code>，别让普通异常穿透（m07）；</li>
+<li><code>serialize()</code> 返回 <code>{"info": {"config": {...}}}</code> 形状，轨迹元数据靠它。</li>
+</ol>
+<p>cookbook 的 <code>EnvironmentWithPythonFunctions</code>（<code>cookbook.md:164-171</code>）示范了最常见改法：拦截特定前缀命令走 Python 函数，其余 <code>super().execute()</code>——继承内置类时哨兵等契约自动保留。</p>
+<h3>4.2 自定义 Model（契约最多）</h3>
+<p>五个方法（<code>__init__.py:43-58</code>）。除了 query 本身，三个契约必须履行：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>契约</th>
+<th>内容</th>
+<th>出处</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>返回形状</td>
+<td>原生消息 + <code>extra{actions, cost, timestamp, response?}</code></td>
+<td><code>litellm_model.py:100-105</code></td>
+</tr>
+<tr>
+<td>FormatError 契约</td>
+<td>解析失败时异常消息的 extra 必须带 cost 与 response</td>
+<td><code>litellm_model.py:87-98</code>（m05）</td>
+</tr>
+<tr>
+<td>全局统计</td>
+<td>每次真实调用后 <code>GLOBAL_MODEL_STATS.add(cost)</code></td>
+<td><code>litellm_model.py:86</code></td>
+</tr>
+</tbody>
+</table></div>
+<p><code>format_observation_messages</code> 决定观察格式：想走 toolcall 格式就复用 <code>actions_toolcall.py:79-113</code>，想走 user 消息就复用 <code>actions_text.py:43-70</code>——解析与格式化器都是公开工具函数，<strong>不用重写，组装即可</strong>。</p>
+<h3>4.3 自定义 Agent（自由最大）</h3>
+<p>协议只有 <code>run</code> 和 <code>save</code>（<code>__init__.py:73-80</code>），但实践中继承 <code>DefaultAgent</code> 挑方法覆写更划算。四个标准插头（前几章已见全部实例）：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>覆写点</th>
+<th>实例</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>step</code></td>
+<td><code>ProgressTrackingAgent</code>（<code>common.py:15-17</code>）</td>
+<td>每步钩子：进度、日志</td>
+</tr>
+<tr>
+<td><code>query</code></td>
+<td><code>InteractiveAgent.query</code>（<code>interactive.py:58</code>）</td>
+<td>调用前钩子</td>
+</tr>
+<tr>
+<td><code>execute_actions</code></td>
+<td>cookbook 的 <code>ValidatingAgent</code>（<code>cookbook.md:246-254</code>）</td>
+<td>执行前校验/拦截</td>
+</tr>
+<tr>
+<td><code>add_messages</code></td>
+<td><code>InteractiveAgent.add_messages</code>（<code>interactive.py:43</code>）</td>
+<td>消息入列钩子</td>
+</tr>
+</tbody>
+</table></div>
+<p>校验示例（<code>cookbook.md:235-254</code>）的写法值得照抄：配置类继承 <code>AgentConfig</code> 加 <code>forbidden_patterns</code> 字段，<code>__init__</code> 传 <code>config_class=ValidatingAgentConfig</code>，<code>execute_actions</code> 里命中禁则抛 <code>FormatError</code>——<strong>拒绝即对话</strong>，模型下轮读到拒绝理由自己改。这就是 config_class 模式（<code>default.py:39</code>）的标准用法。</p>
+<h2>五、确定性模型：不调 API 的测试</h2>
+<p><code>models/test_models.py</code> 的 <code>DeterministicModel</code>（104-143 行）按预设序列返回消息：</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">minisweagent.models.test_models</span><span class="w"> </span><span class="kn">import</span> <span class="n">DeterministicModel</span><span class="p">,</span> <span class="n">make_output</span>
+
+<span class="n">model</span> <span class="o">=</span> <span class="n">DeterministicModel</span><span class="p">(</span><span class="n">outputs</span><span class="o">=</span><span class="p">[</span>
+    <span class="n">make_output</span><span class="p">(</span><span class="s2">"先看目录"</span><span class="p">,</span> <span class="p">[{</span><span class="s2">"command"</span><span class="p">:</span> <span class="s2">"ls"</span><span class="p">}]),</span>
+    <span class="n">make_output</span><span class="p">(</span><span class="s2">"完成"</span><span class="p">,</span> <span class="p">[{</span><span class="s2">"command"</span><span class="p">:</span> <span class="s2">"echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"</span><span class="p">}]),</span>
+<span class="p">])</span>
+</code></pre></div>
+
+<ul>
+<li><code>make_output</code>（16-28 行）造好消息壳（role/content/extra 含 actions/cost/timestamp）；</li>
+<li><code>query</code> 逐次推进 <code>current_index</code>（110-116 行），同样过全局统计；</li>
+<li>特殊动作（75-87 行）：<code>{"raise": 异常实例}</code> 直接抛、<code>/sleep N</code> 睡 N 秒、<code>/warning</code> 打日志——测试重试与超时路径的遥控器。</li>
+</ul>
+<p>另有 <code>DeterministicToolcallModel</code>（160-201 行）与 <code>DeterministicResponseAPIToolcallModel</code>（218-269 行）覆盖另两条路线。注册名 <code>deterministic</code> 已在工厂映射表（<code>models/__init__.py:88</code>）。项目的测试纪律（<code>AGENTS.md</code>）：<strong>pytest、不 mock 未明确要求之物</strong>——确定性模型就是"不 mock 也能测"的基础设施。</p>
+<h2>六、元模型：模型组合模型</h2>
+<p><code>models/extra/roulette.py</code> 展示了协议的另一层威力——<strong>Model 可以包 Model</strong>：</p>
+<ul>
+<li><code>RouletteModel</code>（15-43 行）：配置里给一组 <code>model_kwargs</code>，每次 query 随机挑一个转发（25-33 行），响应上贴 <code>model_name</code> 标签；</li>
+<li><code>InterleavingModel</code>（54 行起）：按 <code>sequence</code> 交替，比如 <code>[0,0,1]</code> 表示 A 两次 B 一次循环。</li>
+</ul>
+<p>因为它们自己也是合法 Model（协议方法全），可以无缝塞进任何 agent。想做"便宜模型探路、贵模型收尾"的混合策略，这就是模板。</p>
+<h2>七、接线：让 CLI 用上你的组件</h2>
+<p>三条路，按侵入性排序：</p>
+<ol>
+<li><strong>全路径类名</strong>：<code>mini --model-class mypkg.mymodel.MyModel --environment-class mypkg.myenv.MyEnv</code>——工厂查不到短名就当 import 路径（m09），你的包只要在 Python 路径上即可；</li>
+<li><strong>自己的 run 脚本</strong>：照 <code>hello_world.py</code>（42 行）组装三组件，<code>typer</code> 加 CLI。项目哲学"每个用例从一个 run 脚本开始"（<code>AGENTS.md</code>）；<code>MSWEA_DEFAULT_RUN</code> 环境变量可把默认入口换成你的脚本（<code>cookbook.md:28</code>）；</li>
+<li><strong>YAML 里写全路径</strong>：<code>model_class: mypkg.mymodel.MyModel</code> 放进配置，效果同 1。</li>
+</ol>
+<h2>八、检查清单与全书收尾</h2>
+<p>自定义组件上线前对照：</p>
+<ul>
+<li>[ ] 协议方法齐全（Model 五 / Environment 三 / Agent 二）；</li>
+<li>[ ] Model：extra 四件套、FormatError 带 cost+response、GLOBAL_MODEL_STATS 记账；</li>
+<li>[ ] Environment：哨兵检查、异常包成 returncode -1、serialize 形状；</li>
+<li>[ ] Agent：run 返回 exit 消息的 extra、save 兼容 None 路径；</li>
+<li>[ ] 配置类走 config_class 模式，<code>model_dump()</code> 可用；</li>
+<li>[ ] 测试用 DeterministicModel，不 mock。</li>
+</ul>
+<p>十二章走完，回到 m01 的问题：为什么一百行能拿 74%？现在的答案具体了——<strong>因为每一行都在做确定性的事</strong>（循环、记账、哨兵、落盘），而所有需要聪明的事（读代码、改 bug、写 patch）都通过那一个 bash 工具让给了模型。脚手架极简，不是功能的缺失，而是责任的清晰。</p>
+<p>这，就是 mini-swe-agent 全部源码教给我们的事。</p>
+<div class="pager"><a href="m11-swebench.html"><span class="dir">← 上一章</span>基准测试 —— 批量跑 SWE-bench 的工程细节</a></div>
+  </div>
+</div>
+</div>
+<script>function toggleTheme(){var h=document.documentElement;
+var t=h.dataset.theme==="dark"?"light":"dark";h.dataset.theme=t;localStorage.setItem("theme",t);}</script>
+</body>
+</html>

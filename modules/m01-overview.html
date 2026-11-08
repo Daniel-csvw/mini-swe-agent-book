@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>概览 —— 一百行代码，74% 的 SWE-bench | mini-swe-agent 源码教程</title>
+<script>(function(){var t=localStorage.getItem("theme");
+if(!t){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
+document.documentElement.dataset.theme=t;})();</script>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../pygments.css">
+</head>
+<body>
+<div class="page">
+<aside class="sidebar">
+  <p class="book-title">mini-swe-agent<br>源码教程</p>
+  <p class="book-sub">基于 v2.4.6 · 12 章</p>
+  <nav><a href="../index.html">首页</a>
+<a href="../modules/m01-overview.html" class="active"><span class="no">M01</span>概览</a>
+<a href="../modules/m02-package-map.html"><span class="no">M02</span>包地图</a>
+<a href="../modules/m03-agent-loop.html"><span class="no">M03</span>Agent 循环</a>
+<a href="../modules/m04-messages-templates.html"><span class="no">M04</span>消息与模板</a>
+<a href="../modules/m05-model-call.html"><span class="no">M05</span>模型调用</a>
+<a href="../modules/m06-actions.html"><span class="no">M06</span>动作解析</a>
+<a href="../modules/m07-environments.html"><span class="no">M07</span>环境</a>
+<a href="../modules/m08-interactive.html"><span class="no">M08</span>交互模式</a>
+<a href="../modules/m09-config.html"><span class="no">M09</span>配置系统</a>
+<a href="../modules/m10-trajectory.html"><span class="no">M10</span>轨迹持久化</a>
+<a href="../modules/m11-swebench.html"><span class="no">M11</span>基准测试</a>
+<a href="../modules/m12-extending.html"><span class="no">M12</span>扩展指南</a></nav>
+</aside>
+<div class="main">
+  <div class="topbar"><button class="theme-toggle" onclick="toggleTheme()">切换明暗</button></div>
+  <div class="content">
+<h1>概览 —— 一百行代码，74% 的 SWE-bench</h1>
+<p class="meta">约 15 分钟读完</p><blockquote>
+<p>本书基于 mini-swe-agent <strong>v2.4.6</strong>（<code>src/minisweagent/__init__.py:11</code>）。所有源码引用均为仓库根目录相对路径加行号，可直接跳转核对。</p>
+</blockquote>
+<h2>一、引子：同一个团队，两次答案</h2>
+<p>2024 年，普林斯顿与斯坦福的团队做了 SWE-bench 和 SWE-agent，点燃了 coding agent 这把火。一年之后，他们问了自己一个问题（<code>README.md:21</code>）：</p>
+<blockquote>
+<p><strong>What if our agent was 100x simpler, and still worked nearly as well?</strong></p>
+</blockquote>
+<p>答案就是 mini-swe-agent。它在 SWE-bench verified 上拿到 <strong>超过 74%</strong> 的成绩（<code>README.md:28</code>），而核心 agent 类只有约一百行有效代码。Meta、NVIDIA、IBM、Nebius、Anyscale 等团队都在用它（<code>README.md:25</code>）。</p>
+<p>这不是一个"够用就行"的玩具。它是一个被刻意压到极简的研究基线：把聚光灯从 agent 脚手架挪回语言模型本身。本书把这个项目的源码逐章拆开。读完你应该能回答三个问题：</p>
+<ol>
+<li>为什么这个 agent <strong>只有 bash 一个工具</strong>，反而跑赢了带几十个工具的复杂脚手架？</li>
+<li>为什么它<strong>不保持一个持久的 shell 会话</strong>，每条命令都开新子壳？</li>
+<li>为什么说它的历史是<strong>完全线性</strong>的，这对调试和微调意味着什么？</li>
+</ol>
+<h2>二、先把词对齐</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>术语</th>
+<th>在本书里的含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>agent / scaffold</td>
+<td>驱动模型循环行动的脚手架程序，即本项目本身</td>
+</tr>
+<tr>
+<td>step</td>
+<td>一次「问模型 → 执行动作 → 回填观察」的完整迭代</td>
+</tr>
+<tr>
+<td>action</td>
+<td>模型要求执行的一条 bash 命令</td>
+</tr>
+<tr>
+<td>observation</td>
+<td>命令执行结果格式化后喂回模型的消息</td>
+</tr>
+<tr>
+<td>trajectory（轨迹）</td>
+<td>一次运行的完整消息记录，落盘为 <code>*.traj.json</code></td>
+</tr>
+<tr>
+<td>SWE-bench</td>
+<td>用真实 GitHub issue 评测修 bug 能力的基准；verified 是其中人工校验过的子集</td>
+</tr>
+<tr>
+<td>tool call</td>
+<td>模型原生的函数调用接口；v2 起默认用它传递 bash 命令</td>
+</tr>
+</tbody>
+</table></div>
+<h2>三、全景：小，是一种可以量化的性质</h2>
+<p>"极简"不是口号，是行数。核心文件实测（v2.4.6，含空行与注释）：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>文件</th>
+<th>行数</th>
+<th>职责</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>src/minisweagent/agents/default.py</code></td>
+<td>190</td>
+<td>agent 主循环</td>
+</tr>
+<tr>
+<td><code>src/minisweagent/agents/interactive.py</code></td>
+<td>209</td>
+<td>人在环路的交互版</td>
+</tr>
+<tr>
+<td><code>src/minisweagent/models/litellm_model.py</code></td>
+<td>164</td>
+<td>默认模型接口</td>
+</tr>
+<tr>
+<td><code>src/minisweagent/environments/local.py</code></td>
+<td>92</td>
+<td>本地执行环境</td>
+</tr>
+<tr>
+<td><code>src/minisweagent/environments/docker.py</code></td>
+<td>161</td>
+<td>Docker 执行环境</td>
+</tr>
+<tr>
+<td><code>src/minisweagent/run/hello_world.py</code></td>
+<td>42</td>
+<td>最小入口脚本</td>
+</tr>
+<tr>
+<td><code>src/minisweagent/run/mini.py</code></td>
+<td>109</td>
+<td>默认 CLI 入口</td>
+</tr>
+<tr>
+<td><code>src/minisweagent/exceptions.py</code></td>
+<td>26</td>
+<td>全部控制流异常</td>
+</tr>
+</tbody>
+</table></div>
+<p>README 说 agent 类"约 100 行"（<code>README.md:26</code>），指的是刨去配置类、序列化方法之后的有效逻辑。整个核心链路——入口、循环、模型、环境——加起来不到七百行，且<strong>没有任何重型框架依赖</strong>：没有 LangChain，没有工作流引擎，只有 litellm、pydantic、jinja2 这类单一职责的工具库（<code>pyproject.toml:33-48</code>）。</p>
+<p>项目结构五个目录，各管一件事：</p>
+<div class="codehilite"><pre><span></span><code>src/minisweagent/
+├── __init__.py      # 三个协议（Model / Environment / Agent）+ 全局配置加载
+├── agents/          # 控制流：循环怎么转
+├── models/          # LM 接口：怎么问模型、怎么解析动作
+├── environments/    # 动作执行：命令在哪里跑
+├── run/             # 入口脚本：把三者组装起来
+├── config/          # 内置 YAML 配置（提示词模板都住在这里）
+└── utils/           # 日志、递归合并等小工具
+</code></pre></div>
+
+<p>记住这个五分法，后面每一章都落在其中一格上。</p>
+<h2>四、三根设计支柱</h2>
+<p>README 的动机部分（<code>README.md:38-54</code>）把设计哲学说得很直白，归纳为三根支柱。</p>
+<h3>4.1 支柱一：除了 bash，没有别的工具</h3>
+<p>传统脚手架（包括团队自己的 SWE-agent）为每类操作设计专门工具：打开文件、编辑行、搜索符号……mini 反其道而行：<strong>只给模型一个 bash 工具</strong>（<code>src/minisweagent/models/utils/actions_toolcall.py:11-27</code>），甚至可以不依赖模型的原生工具调用接口，用正则从文本里抠命令（textbased 路线，见 m06）。</p>
+<p>这个决定的影响是深远的：</p>
+<ul>
+<li><strong>任何模型都能跑</strong>——不支持 function calling 的模型走 textbased 路线即可；</li>
+<li><strong>沙箱里零安装</strong>——环境里只要有 bash 就够，不用装任何工具包；</li>
+<li>想让 agent 做新事情（比如开 PR）？写在提示词里让模型自己想办法，而不是给脚手架加代码（<code>README.md:73-74</code>）。</li>
+</ul>
+<h3>4.2 支柱二：每条命令都是独立子壳</h3>
+<p>mini 用 <code>subprocess</code> 执行动作，<strong>每条命令完全独立</strong>，不维护一个长期存活的 shell 会话（<code>README.md:48-50</code>）。<code>cd</code>、环境变量在命令之间不持久——提示词里明确告诉模型这一点，并教它用 <code>MY_VAR=x cd /path &amp;&amp; ...</code> 单行复合命令绕过（<code>src/minisweagent/config/mini.yaml:39-40</code>）。</p>
+<p>代价是模型要多写几个 <code>cd</code>；收益是工程上的巨大简化：</p>
+<ul>
+<li>把执行搬进沙箱，只是把 <code>subprocess.run</code> 换成 <code>docker exec</code>（<code>README.md:49</code> 原文就是这么说的）；</li>
+<li>没有会话状态就没有状态腐化，并发扩容平凡；</li>
+<li>超时处理干净——杀整个进程组即可（m07 细讲）。</li>
+</ul>
+<p>官方 FAQ 专门有一节 "why no shell session"，README 两次强调 "this is a big deal, trust me"（<code>README.md:50</code>、<code>README.md:76</code>）。</p>
+<h3>4.3 支柱三：完全线性的历史</h3>
+<p>每一步只是往 <code>messages</code> 列表<strong>追加</strong>消息，从不修剪、从不压缩、从不重排（<code>README.md:45-47</code>）。于是：</p>
+<blockquote>
+<p><strong>轨迹（trajectory）和喂给模型的 messages 是同一个东西。</strong></p>
+</blockquote>
+<p>没有"模型实际看到的"和"日志里记的"两份历史之分。调试时你看到的就是模型看到的；做微调时轨迹可以直接当训练数据。v2 之后唯一的加工是：发给 API 前剥掉 <code>extra</code> 元数据字段、做少量 API 兼容性重排（m05 细讲），语义内容不变。</p>
+<p><strong>这三根支柱共同指向一个立场：把复杂度让给模型，把确定性留给代码。</strong> 模型负责聪明，脚手架负责可预测。</p>
+<h2>五、v1 → v2：一次值得知道的演进</h2>
+<p>当前是 v2 时代（<code>README.md:16-17</code> 的警告框）。如果你在网上读到旧教程，注意这些差异（详见 <code>docs/advanced/v2_migration.md</code>）：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>维度</th>
+<th>v1</th>
+<th>v2（本书）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>动作传递</td>
+<td>正则解析 <code>```mswea_bash_command</code> 代码块</td>
+<td>原生 tool call 为默认，textbased 保留为备选</td>
+</tr>
+<tr>
+<td>动作解析职责</td>
+<td>agent 管</td>
+<td><strong>模型类管</strong>——换模型类即换解析方式（<code>v2_migration.md:166</code>）</td>
+</tr>
+<tr>
+<td>成本记账</td>
+<td>model 持有</td>
+<td><strong>agent 持有</strong>，model 无状态化（<code>v2_migration.md:168</code>）</td>
+</tr>
+<tr>
+<td>配置类</td>
+<td>dataclass</td>
+<td>pydantic <code>BaseModel</code>（<code>v2_migration.md:170</code>）</td>
+</tr>
+<tr>
+<td>消息格式</td>
+<td>手工规范化</td>
+<td>模型原生输出 + <code>extra</code> 字段（<code>v2_migration.md:122</code>）</td>
+</tr>
+<tr>
+<td>完成信号</td>
+<td><code>MINI_SWE_AGENT_FINAL_OUTPUT</code></td>
+<td><code>COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT</code>（<code>v2_migration.md:52</code>）</td>
+</tr>
+<tr>
+<td>组件对接</td>
+<td>继承</td>
+<td><strong>协议 + 鸭子类型</strong>，不强制继承（<code>v2_migration.md:176-179</code>）</td>
+</tr>
+</tbody>
+</table></div>
+<p>其中"职责转移"最重要：v2 的 agent 成了纯协调者，解析动作、格式化观察都下沉到模型类。这是理解 m03、m05、m06 三章分工的钥匙。</p>
+<h2>六、本书地图</h2>
+<p>十二章，按「先全景、后机制、再工程」排序：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>章</th>
+<th>主题</th>
+<th>一句话</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>m02</td>
+<td>包地图</td>
+<td>五个目录、三个协议、依赖与入口</td>
+</tr>
+<tr>
+<td>m03</td>
+<td>Agent 循环</td>
+<td><code>run/step/query/execute_actions</code> 与异常控制流</td>
+</tr>
+<tr>
+<td>m04</td>
+<td>消息与模板</td>
+<td>消息结构、<code>extra</code>、Jinja 模板变量从哪来</td>
+</tr>
+<tr>
+<td>m05</td>
+<td>模型调用</td>
+<td>重试、成本核算、FormatError 契约</td>
+</tr>
+<tr>
+<td>m06</td>
+<td>动作解析</td>
+<td>toolcall / textbased / Responses API 三条路线</td>
+</tr>
+<tr>
+<td>m07</td>
+<td>环境</td>
+<td>子壳执行、哨兵命令、进程组、Docker 生命周期</td>
+</tr>
+<tr>
+<td>m08</td>
+<td>交互模式</td>
+<td>human / confirm / yolo 三态与中断恢复</td>
+</tr>
+<tr>
+<td>m09</td>
+<td>配置系统</td>
+<td>YAML 合并、UNSET 哨兵、三个工厂函数</td>
+</tr>
+<tr>
+<td>m10</td>
+<td>轨迹持久化</td>
+<td>traj.json 格式与 inspector 回放器</td>
+</tr>
+<tr>
+<td>m11</td>
+<td>基准测试</td>
+<td>批量跑 SWE-bench 的并发与断点续跑</td>
+</tr>
+<tr>
+<td>m12</td>
+<td>扩展指南</td>
+<td>不改源码，写你自己的组件</td>
+</tr>
+</tbody>
+</table></div>
+<p>建议阅读路径：m02 → m03 → m04 是地基，必读；之后 m05/m06/m07 可按兴趣乱序；做评测读 m11，做二次开发读 m12。</p>
+<h2>七、小结</h2>
+<ul>
+<li>mini-swe-agent 是 SWE-agent 团队对自己的"100x 简化"回答：核心链路不足七百行，SWE-bench verified &gt;74%。</li>
+<li>三根支柱：<strong>只有 bash</strong>、<strong>无状态子壳</strong>、<strong>线性历史</strong>。每一根都在后面的章节里有具体的代码落点。</li>
+<li>v2 的关键演进：解析职责下沉到模型类、agent 纯协调化、协议代替继承。</li>
+<li>下一章先把包结构、三个协议和程序入口看清楚，再进循环。</li>
+</ul>
+<div class="pager"><a class="next" href="m02-package-map.html"><span class="dir">下一章 →</span>包地图 —— 五个目录，三个协议</a></div>
+  </div>
+</div>
+</div>
+<script>function toggleTheme(){var h=document.documentElement;
+var t=h.dataset.theme==="dark"?"light":"dark";h.dataset.theme=t;localStorage.setItem("theme",t);}</script>
+</body>
+</html>

@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>配置系统 —— YAML、UNSET 与递归合并 | mini-swe-agent 源码教程</title>
+<script>(function(){var t=localStorage.getItem("theme");
+if(!t){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
+document.documentElement.dataset.theme=t;})();</script>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../pygments.css">
+</head>
+<body>
+<div class="page">
+<aside class="sidebar">
+  <p class="book-title">mini-swe-agent<br>源码教程</p>
+  <p class="book-sub">基于 v2.4.6 · 12 章</p>
+  <nav><a href="../index.html">首页</a>
+<a href="../modules/m01-overview.html"><span class="no">M01</span>概览</a>
+<a href="../modules/m02-package-map.html"><span class="no">M02</span>包地图</a>
+<a href="../modules/m03-agent-loop.html"><span class="no">M03</span>Agent 循环</a>
+<a href="../modules/m04-messages-templates.html"><span class="no">M04</span>消息与模板</a>
+<a href="../modules/m05-model-call.html"><span class="no">M05</span>模型调用</a>
+<a href="../modules/m06-actions.html"><span class="no">M06</span>动作解析</a>
+<a href="../modules/m07-environments.html"><span class="no">M07</span>环境</a>
+<a href="../modules/m08-interactive.html"><span class="no">M08</span>交互模式</a>
+<a href="../modules/m09-config.html" class="active"><span class="no">M09</span>配置系统</a>
+<a href="../modules/m10-trajectory.html"><span class="no">M10</span>轨迹持久化</a>
+<a href="../modules/m11-swebench.html"><span class="no">M11</span>基准测试</a>
+<a href="../modules/m12-extending.html"><span class="no">M12</span>扩展指南</a></nav>
+</aside>
+<div class="main">
+  <div class="topbar"><button class="theme-toggle" onclick="toggleTheme()">切换明暗</button></div>
+  <div class="content">
+<h1>配置系统 —— YAML、UNSET 与递归合并</h1>
+<p class="meta">约 17 分钟读完</p><blockquote>
+<p>本章源文件：<code>src/minisweagent/config/__init__.py</code>（64 行）、<code>utils/serialize.py</code>（29 行）、<code>run/mini.py</code>（109 行）、<code>run/utilities/config.py</code>（131 行）、三个组件工厂。</p>
+</blockquote>
+<h2>一、引子：-c 后面能跟什么</h2>
+<p><code>mini -c mini.yaml -c model.model_kwargs.temperature=0.5 -c agent.cost_limit=5</code> —— 一个 <code>-c</code> 既能跟文件名又能跟键值对，多个 <code>-c</code> 还能叠加。这套配置系统全部实现加起来不到一百行，却支撑了从 CLI 到基准测试的所有入口。读完你应该能回答三个问题：</p>
+<ol>
+<li>一个 config spec 字符串是怎么变成嵌套 dict 的？文件找不到时去哪些地方找？</li>
+<li><code>UNSET</code> 这个哨兵对象解决了什么问题？为什么不能用 <code>None</code>？</li>
+<li>配置里的 <code>model_class: "litellm"</code> 是怎么变成活生生的模型对象的？</li>
+</ol>
+<h2>二、先把词对齐</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>术语</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>config spec</td>
+<td><code>-c</code> 接受的字符串：YAML 文件名/路径，或 <code>key.path=value</code></td>
+</tr>
+<tr>
+<td>递归合并</td>
+<td>多个配置 dict 深度合并，后者为王（<code>recursive_merge</code>）</td>
+</tr>
+<tr>
+<td>UNSET</td>
+<td>模块级哨兵对象，表示"此键未设置"，合并时跳过</td>
+</tr>
+<tr>
+<td>全局配置</td>
+<td>用户配置目录下的 <code>.env</code>，存 API key 与默认模型</td>
+</tr>
+<tr>
+<td>内置配置</td>
+<td>包内 <code>config/</code> 目录的 YAML，随包分发</td>
+</tr>
+</tbody>
+</table></div>
+<h2>三、全景：mini 的配置流水线（mini.py:68-101）</h2>
+<div class="codehilite"><pre><span></span><code>mini -c mini.yaml -c model.model_kwargs.temperature=0.5 -m anthropic/... -y
+│
+├─ configure_if_first_time()            :68  首次运行引导 setup
+│
+├─ 每个 spec → get_config_from_spec     :72
+│     "mini.yaml"        → 查找文件 → yaml.safe_load
+│     "a.b=c"            → 按 = 拆分 → 嵌套 dict
+│
+├─ 追加 CLI 覆盖层（未设置的键填 UNSET）  :73-91
+│     {"agent": {"mode": "yolo", "cost_limit": UNSET, ...}, ...}
+│
+├─ recursive_merge(*configs)            :92  UNSET 被跳过，YAML 值存活
+│
+├─ task 缺失 → 多行提示输入              :94-97
+│
+└─ 三个工厂实例化                        :99-101
+      get_model(config["model"])
+      get_environment(config["environment"], default_type="local")
+      get_agent(model, env, config["agent"], default_type="interactive")
+</code></pre></div>
+
+<h2>四、spec 解析：六十行的全部</h2>
+<h3>4.1 分流（get_config_from_spec，56-61 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">config_spec</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">and</span> <span class="s2">"="</span> <span class="ow">in</span> <span class="n">config_spec</span><span class="p">:</span>
+    <span class="k">return</span> <span class="n">_key_value_spec_to_nested_dict</span><span class="p">(</span><span class="n">config_spec</span><span class="p">)</span>
+<span class="n">path</span> <span class="o">=</span> <span class="n">get_config_path</span><span class="p">(</span><span class="n">config_spec</span><span class="p">)</span>
+<span class="k">return</span> <span class="n">yaml</span><span class="o">.</span><span class="n">safe_load</span><span class="p">(</span><span class="n">path</span><span class="o">.</span><span class="n">read_text</span><span class="p">(</span><span class="n">encoding</span><span class="o">=</span><span class="s2">"utf-8"</span><span class="p">))</span>
+</code></pre></div>
+
+<p>含 <code>=</code> 就是键值对，否则当文件。注意顺序：<strong>键值对优先</strong>——<code>a=b.yaml</code> 会被解析成键值对而非文件名。</p>
+<h3>4.2 文件查找：五个候选（get_config_path，12-28 行）</h3>
+<p>后缀不是 <code>.yaml</code> 先补上（15-16 行），然后按序尝试（17-23 行）：</p>
+<ol>
+<li>原样路径（<code>./mini.yaml</code> 或绝对路径）；</li>
+<li><code>MSWEA_CONFIG_DIR</code> 环境变量指向的目录（默认 <code>.</code>）；</li>
+<li><strong>包内置 config 目录</strong>；</li>
+<li>内置 <code>config/extra/</code>；</li>
+<li>内置 <code>config/benchmarks/</code>。</li>
+</ol>
+<p>所以 <code>-c swebench.yaml</code> 能找到 <code>config/benchmarks/swebench.yaml</code>，<code>-c mini</code> 也行（自动补后缀）。全部落空则 <code>FileNotFoundError</code>，错误信息列出所有候选路径——照着改即可。</p>
+<h3>4.3 键值对：点号嵌套 + JSON 试探（31-53 行）</h3>
+<p><code>model.model_kwargs.temperature=0.5</code> 的旅程：</p>
+<div class="codehilite"><pre><span></span><code><span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="o">=</span> <span class="n">config_spec</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">"="</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>     <span class="c1"># :39  只切第一个 =，值里可以有 =</span>
+<span class="k">try</span><span class="p">:</span>
+    <span class="n">value</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">value</span><span class="p">)</span>              <span class="c1"># :41  "0.5"→float、"true"→bool、"[1,2]"→list</span>
+<span class="k">except</span> <span class="n">json</span><span class="o">.</span><span class="n">JSONDecodeError</span><span class="p">:</span>
+    <span class="k">pass</span>                                   <span class="c1"># :43  不是 JSON 就当字符串</span>
+<span class="n">keys</span> <span class="o">=</span> <span class="n">key</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">"."</span><span class="p">)</span>                      <span class="c1"># :44</span>
+<span class="c1"># 逐层建嵌套 dict                            :47-52</span>
+</code></pre></div>
+
+<p>两个细节：值先过 <code>json.loads</code>，所以数字、布尔、列表、带引号的字符串都能正确类型化——<code>temperature=0.5</code> 得到的是 float 不是 str；空键段（<code>a..b=c</code>）直接抛 <code>ValueError</code>（45-46 行），防手滑。</p>
+<h2>五、UNSET：为什么 None 不够用</h2>
+<p>CLI 参数的困境：<code>mini.py</code> 的 <code>cost_limit</code> 选项默认 <code>None</code>（62 行）。合并配置时，<code>None</code> 应该理解为"用户没给，别覆盖 YAML 里的值"——但 YAML 里某个键可能<strong>真的就是 null</strong>。两种语义需要一个区分。</p>
+<p>解法（<code>utils/serialize.py:3</code>）：</p>
+<div class="codehilite"><pre><span></span><code><span class="n">UNSET</span> <span class="o">=</span> <span class="nb">object</span><span class="p">()</span>
+</code></pre></div>
+
+<p>一个没有任何含义的对象，唯一用途就是"未设置"标记。<code>mini.py:73-91</code> 把 CLI 参数包成覆盖层时，没给的键一律填 UNSET：</p>
+<div class="codehilite"><pre><span></span><code><span class="s2">"agent"</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s2">"mode"</span><span class="p">:</span> <span class="s2">"yolo"</span> <span class="k">if</span> <span class="n">yolo</span> <span class="k">else</span> <span class="n">UNSET</span><span class="p">,</span>
+    <span class="s2">"cost_limit"</span><span class="p">:</span> <span class="n">cost_limit</span> <span class="k">if</span> <span class="n">cost_limit</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">UNSET</span><span class="p">,</span>
+    <span class="o">...</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><code>recursive_merge</code> 遇到 UNSET 跳过（<code>serialize.py:20-21</code>），且<strong>递归地</strong>过滤嵌套 dict 里的 UNSET（24-26 行）——所以覆盖层可以放心地构造完整形状，没设置的键自然消失。合并规则全文三条（m04 已述）：None 字典跳过、UNSET 键跳过、dict 递归合并否则覆盖。</p>
+<p><strong>优先级链最终形态</strong>：内置 YAML &lt; 用户 YAML（多个 <code>-c</code> 按序）&lt; CLI 显式参数。<code>mini.py:33-47</code> 的帮助文本用红色大字警告：一旦用了 <code>-c</code>，默认配置文件<strong>不再自动加载</strong>，必须自己显式 <code>-c mini.yaml</code>——这是新手最常踩的坑。</p>
+<h2>六、三个工厂：配置键到对象</h2>
+<p>配置合并完，三个 <code>*_class</code> 键决定实例化谁。模式统一（m02 已见 <code>get_agent</code>）：深拷贝 → 弹出 class 键 → 短名查表 / 全路径 importlib → 实例化。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>工厂</th>
+<th>映射表</th>
+<th>默认</th>
+<th>特殊逻辑</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>get_agent</code>（<code>agents/__init__.py:25-28</code>）</td>
+<td>default / interactive（8-11 行）</td>
+<td>由调用方 <code>default_type</code> 给</td>
+<td>mini.py 传 <code>"interactive"</code></td>
+</tr>
+<tr>
+<td><code>get_environment</code>（<code>environments/__init__.py:30-33</code>）</td>
+<td>七种环境（8-16 行）</td>
+<td>mini.py 传 <code>"local"</code></td>
+<td>无</td>
+</tr>
+<tr>
+<td><code>get_model</code>（<code>models/__init__.py:45-62</code>）</td>
+<td>十个模型类（78-89 行）</td>
+<td><code>LitellmModel</code></td>
+<td>模型名三级解析 + Anthropic 自动缓存标记</td>
+</tr>
+</tbody>
+</table></div>
+<p><code>get_model</code> 的模型名解析（65-75 行）：显式参数 &gt; 配置 <code>model_name</code> &gt; <code>MSWEA_MODEL_NAME</code> 环境变量 &gt; 抛错指引 setup。这就是为什么 <code>mini-extra config setup</code> 设一次模型名之后 <code>mini</code> 裸跑即可。</p>
+<p><strong>全路径是一等公民</strong>：<code>get_agent_class</code>（<code>agents/__init__.py:14-22</code>）先查映射表，查不到就把 spec 当 <code>module.Class</code> 全路径 import。你的自定义类写在任何可 import 的地方都行，无需注册（m12 实践）。</p>
+<h2>七、全局 .env：另一条配置线</h2>
+<p>YAML 管"运行行为"，<code>.env</code> 管"密钥与默认值"。加载点 m02 讲过（<code>__init__.py:26-36</code>，import 即加载）。管理工具是 <code>mini-extra config</code>（<code>run/utilities/config.py</code>）：</p>
+<ul>
+<li><strong>首次引导</strong>：<code>mini</code> 启动时 <code>configure_if_first_time</code>（62-66 行）检查 <code>MSWEA_CONFIGURED</code> 环境变量，没有就跑 <code>setup()</code>；</li>
+<li><strong>setup</strong>（70-96 行）：问默认模型名、问 API key 名与值，用 <code>dotenv.set_key</code> 写进 <code>.env</code>，最后写入 <code>MSWEA_CONFIGURED=true</code>（92 行）并 <code>_reload_config()</code> 立即生效；</li>
+<li><code>set</code> / <code>unset</code> / <code>edit</code> 子命令（99-127 行）：改键、删键、用 <code>$EDITOR</code> 打开文件。</li>
+</ul>
+<p>litellm 读环境变量里的各家 API key，所以这条线本质是<strong>给 litellm 准备环境变量</strong>。模型调用时认证失败的那句提示（<code>litellm_model.py:73</code>）引导用户来的就是这里。</p>
+<h2>八、内置 YAML 家族</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>文件</th>
+<th>用途</th>
+<th>关键差异</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>config/mini.yaml</code></td>
+<td><code>mini</code> CLI 默认</td>
+<td>toolcall 提示词、<code>mode: confirm</code>、cost_limit 3</td>
+</tr>
+<tr>
+<td><code>config/default.yaml</code></td>
+<td>hello_world 默认</td>
+<td>textbased 提示词、cost_limit 0（不限）</td>
+</tr>
+<tr>
+<td><code>config/mini_textbased.yaml</code></td>
+<td>CLI 的 textbased 版</td>
+<td>同 default 的格式约束</td>
+</tr>
+<tr>
+<td><code>config/benchmarks/swebench.yaml</code></td>
+<td>SWE-bench 默认</td>
+<td>docker、<code>/testbed</code>、step_limit 250、提交 patch 流程（m11）</td>
+</tr>
+<tr>
+<td><code>config/benchmarks/swebench_backticks.yaml</code> 等</td>
+<td>变体</td>
+<td>textbased / xml / modal 版本</td>
+</tr>
+<tr>
+<td><code>config/benchmarks/programbench.yaml</code></td>
+<td>ProgramBench</td>
+<td>另一种评测</td>
+</tr>
+</tbody>
+</table></div>
+<p>读模板差异时对照 m04：YAML 不只是参数表，<strong>提示词工程的全部产物都住在 config 里</strong>，换 YAML 等于换 agent 的"性格"。</p>
+<h2>九、小结</h2>
+<ul>
+<li>config spec 两种形态：文件（五候选路径查找）与 <code>key.path=value</code>（JSON 类型试探 + 点号嵌套）。</li>
+<li>合并优先级：内置 &lt; 用户 <code>-c</code> 序列 &lt; CLI 显式参数；UNSET 哨兵让"未设置"与"设为 null"语义分离。</li>
+<li>用了 <code>-c</code> 就必须显式带上基础配置文件——默认不会自动叠加。</li>
+<li>三工厂同构：短名映射表 + 全路径 importlib；模型名三级解析；<code>.env</code> 由 <code>mini-extra config</code> 管理、import 时加载。</li>
+<li>下一章看运行的产物：traj.json 的结构，以及用 inspector 回放它。</li>
+</ul>
+<div class="pager"><a href="m08-interactive.html"><span class="dir">← 上一章</span>交互模式 —— human/confirm/yolo 三态</a><a class="next" href="m10-trajectory.html"><span class="dir">下一章 →</span>轨迹持久化 —— traj.json 与 inspector</a></div>
+  </div>
+</div>
+</div>
+<script>function toggleTheme(){var h=document.documentElement;
+var t=h.dataset.theme==="dark"?"light":"dark";h.dataset.theme=t;localStorage.setItem("theme",t);}</script>
+</body>
+</html>

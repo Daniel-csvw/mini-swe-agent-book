@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>环境 —— 子壳、哨兵与进程组 | mini-swe-agent 源码教程</title>
+<script>(function(){var t=localStorage.getItem("theme");
+if(!t){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
+document.documentElement.dataset.theme=t;})();</script>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../pygments.css">
+</head>
+<body>
+<div class="page">
+<aside class="sidebar">
+  <p class="book-title">mini-swe-agent<br>源码教程</p>
+  <p class="book-sub">基于 v2.4.6 · 12 章</p>
+  <nav><a href="../index.html">首页</a>
+<a href="../modules/m01-overview.html"><span class="no">M01</span>概览</a>
+<a href="../modules/m02-package-map.html"><span class="no">M02</span>包地图</a>
+<a href="../modules/m03-agent-loop.html"><span class="no">M03</span>Agent 循环</a>
+<a href="../modules/m04-messages-templates.html"><span class="no">M04</span>消息与模板</a>
+<a href="../modules/m05-model-call.html"><span class="no">M05</span>模型调用</a>
+<a href="../modules/m06-actions.html"><span class="no">M06</span>动作解析</a>
+<a href="../modules/m07-environments.html" class="active"><span class="no">M07</span>环境</a>
+<a href="../modules/m08-interactive.html"><span class="no">M08</span>交互模式</a>
+<a href="../modules/m09-config.html"><span class="no">M09</span>配置系统</a>
+<a href="../modules/m10-trajectory.html"><span class="no">M10</span>轨迹持久化</a>
+<a href="../modules/m11-swebench.html"><span class="no">M11</span>基准测试</a>
+<a href="../modules/m12-extending.html"><span class="no">M12</span>扩展指南</a></nav>
+</aside>
+<div class="main">
+  <div class="topbar"><button class="theme-toggle" onclick="toggleTheme()">切换明暗</button></div>
+  <div class="content">
+<h1>环境 —— 子壳、哨兵与进程组</h1>
+<p class="meta">约 20 分钟读完</p><blockquote>
+<p>本章源文件：<code>src/minisweagent/environments/local.py</code>（92 行）、<code>docker.py</code>（161 行）、<code>singularity.py</code>、<code>extra/bubblewrap.py</code>、<code>environments/__init__.py</code>。</p>
+</blockquote>
+<h2>一、引子：同一句话，换个地方执行</h2>
+<p>agent 循环对执行环境的全部认知是：<code>env.execute(action)</code> 返回一个 dict。把这个 dict 背后的实现从"本地 subprocess"换成"docker exec"，agent 一行不改——m01 说的"沙箱化平凡"在这一章兑现。读完你应该能回答三个问题：</p>
+<ol>
+<li>命令超时后，怎么保证不留孤儿进程？</li>
+<li><code>COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT</code> 这串魔法字符串是怎么让 agent 停下来的？为什么检查它的是环境而不是 agent？</li>
+<li>Docker 环境的容器什么时候启动、什么时候销毁？<code>docker exec</code> 和本地 <code>subprocess</code> 差在哪几行？</li>
+</ol>
+<h2>二、先把词对齐</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>术语</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>子壳（subshell）</td>
+<td>每条命令新开的 shell 进程；cd/环境变量不跨命令持久</td>
+</tr>
+<tr>
+<td>哨兵命令</td>
+<td>输出首行等于魔法字符串即视为提交，触发 <code>Submitted</code></td>
+</tr>
+<tr>
+<td>进程组</td>
+<td>POSIX 下同一 session 的进程集合；<code>killpg</code> 一锅端</td>
+</tr>
+<tr>
+<td>action / output</td>
+<td>入参 <code>{"command": ...}</code>；出参 <code>{"output", "returncode", "exception_info", "extra"?}</code></td>
+</tr>
+</tbody>
+</table></div>
+<h2>三、全景：Environment 协议的三种实现</h2>
+<p>协议只有三个方法（<code>__init__.py:61-70</code>）：<code>execute</code>、<code>get_template_vars</code>、<code>serialize</code>。工厂映射表（<code>environments/__init__.py:8-16</code>）注册了七种环境：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>环境</th>
+<th>执行方式</th>
+<th>典型场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>local</code></td>
+<td>本地 <code>subprocess.Popen</code></td>
+<td>日常 CLI（<code>mini</code> 默认）</td>
+</tr>
+<tr>
+<td><code>docker</code></td>
+<td><code>docker run -d</code> + <code>docker exec</code></td>
+<td>SWE-bench 评测、隔离任务</td>
+</tr>
+<tr>
+<td><code>singularity</code></td>
+<td>先 build sandbox 目录再 <code>exec</code></td>
+<td>HPC 集群（无 Docker daemon 权限）</td>
+</tr>
+<tr>
+<td><code>bubblewrap</code></td>
+<td><code>bwrap</code> 非特权沙箱</td>
+<td>Linux 轻量隔离（实验性）</td>
+</tr>
+<tr>
+<td><code>swerex_docker</code> / <code>swerex_modal</code></td>
+<td>经 SWE-ReX 执行服务</td>
+<td>远程/Modal 云执行</td>
+</tr>
+<tr>
+<td><code>contree</code></td>
+<td>Contree SDK</td>
+<td>第三方沙箱服务</td>
+</tr>
+</tbody>
+</table></div>
+<p>本章精读前两个，其余触类旁通。</p>
+<h2>四、LocalEnvironment：92 行的全部家当</h2>
+<h3>4.1 配置与 execute 主干（13-43 行）</h3>
+<p>配置三字段（13-16 行）：<code>cwd</code>（默认空 = 进程当前目录）、<code>env</code>（追加的环境变量）、<code>timeout</code>（默认 30 秒）。</p>
+<p><code>execute</code>（24-43 行）主干：</p>
+<div class="codehilite"><pre><span></span><code><span class="n">command</span> <span class="o">=</span> <span class="n">action</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"command"</span><span class="p">,</span> <span class="s2">""</span><span class="p">)</span>                                    <span class="c1"># :26</span>
+<span class="n">cwd</span> <span class="o">=</span> <span class="n">cwd</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">cwd</span> <span class="ow">or</span> <span class="n">os</span><span class="o">.</span><span class="n">getcwd</span><span class="p">()</span>                            <span class="c1"># :27</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">_run</span><span class="p">(</span><span class="n">command</span><span class="p">,</span> <span class="n">cwd</span><span class="p">,</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span> <span class="o">|</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">env</span><span class="p">,</span> <span class="n">timeout</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">timeout</span><span class="p">)</span>  <span class="c1"># :29</span>
+<span class="n">output</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"output"</span><span class="p">:</span> <span class="n">result</span><span class="o">.</span><span class="n">stdout</span><span class="p">,</span> <span class="s2">"returncode"</span><span class="p">:</span> <span class="n">result</span><span class="o">.</span><span class="n">returncode</span><span class="p">,</span> <span class="s2">"exception_info"</span><span class="p">:</span> <span class="s2">""</span><span class="p">}</span>  <span class="c1"># :30</span>
+</code></pre></div>
+
+<p>三个合并方向值得看清：cwd 是"参数 &gt; 配置 &gt; 进程目录"；环境变量是"宿主环境 | 配置覆盖"（配置优先）；stderr 并进 stdout（<code>_run</code> 里 <code>stderr=subprocess.STDOUT</code>，83 行）——模型只需要一份按时间序的混合输出。</p>
+<p><strong>异常不出环境</strong>（31-41 行）：超时等任何异常都被包成 <code>{"returncode": -1, "exception_info": "An error occurred...", "extra": {"exception_type": ...}}</code> 正常返回。命令失败是数据，不是事故——模型下一轮自己读到 <code>exception_info</code> 想办法。唯一的例外是哨兵触发的 <code>Submitted</code>（42 行），那是控制流，必须穿透。</p>
+<h3>4.2 _run：杀进程组的讲究（72-92 行）</h3>
+<p>这个模块级函数是本地环境唯一"有技术含量"的部分，docstring 说明意图（73 行）："kills the whole process group on timeout so no children are orphaned"。</p>
+<div class="codehilite"><pre><span></span><code><span class="n">process</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">Popen</span><span class="p">(</span>
+    <span class="n">command</span><span class="p">,</span> <span class="n">shell</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="o">...</span><span class="p">,</span>
+    <span class="n">start_new_session</span><span class="o">=</span><span class="n">os</span><span class="o">.</span><span class="n">name</span> <span class="o">==</span> <span class="s2">"posix"</span><span class="p">,</span>        <span class="c1"># :84  子进程自成会话/进程组</span>
+<span class="p">)</span>
+<span class="k">try</span><span class="p">:</span>
+    <span class="n">stdout</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">process</span><span class="o">.</span><span class="n">communicate</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="n">timeout</span><span class="p">)</span>   <span class="c1"># :87</span>
+<span class="k">except</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">TimeoutExpired</span><span class="p">:</span>
+    <span class="n">os</span><span class="o">.</span><span class="n">killpg</span><span class="p">(</span><span class="n">process</span><span class="o">.</span><span class="n">pid</span><span class="p">,</span> <span class="n">signal</span><span class="o">.</span><span class="n">SIGKILL</span><span class="p">)</span> <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">name</span> <span class="o">==</span> <span class="s2">"posix"</span> <span class="k">else</span> <span class="n">process</span><span class="o">.</span><span class="n">kill</span><span class="p">()</span>  <span class="c1"># :89</span>
+    <span class="n">stdout</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">process</span><span class="o">.</span><span class="n">communicate</span><span class="p">()</span>                  <span class="c1"># :90  收尸，取回已产出输出</span>
+    <span class="k">raise</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">TimeoutExpired</span><span class="p">(</span><span class="n">command</span><span class="p">,</span> <span class="n">timeout</span><span class="p">,</span> <span class="n">output</span><span class="o">=</span><span class="n">stdout</span><span class="p">)</span>  <span class="c1"># :91</span>
+</code></pre></div>
+
+<p>逐点拆解：</p>
+<ul>
+<li><strong>84 行 <code>start_new_session=True</code></strong>：让 shell 及其子孙成为独立进程组。没有它，89 行的 <code>killpg</code> 会误杀 agent 自己；</li>
+<li><strong>89 行 <code>killpg(..., SIGKILL)</code></strong>：<code>bash -c "sleep 100 &amp; sleep 200"</code> 这种命令，只杀 shell 会留下两个孤儿 sleep。杀整组才干净。Windows 无进程组概念，退化为 <code>process.kill()</code>；</li>
+<li><strong>90-91 行</strong>：杀完再 <code>communicate()</code> 收回已产生的输出，并把 output 塞进重新抛出的 <code>TimeoutExpired</code>——上层 execute 的 32 行 <code>getattr(e, "output", None)</code> 就是接它的。<strong>超时命令的部分输出也能进轨迹</strong>，模型能看到超时前打印了什么。</li>
+</ul>
+<h3>4.3 哨兵：_check_finished（45-56 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="n">lines</span> <span class="o">=</span> <span class="n">output</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"output"</span><span class="p">,</span> <span class="s2">""</span><span class="p">)</span><span class="o">.</span><span class="n">lstrip</span><span class="p">()</span><span class="o">.</span><span class="n">splitlines</span><span class="p">(</span><span class="n">keepends</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>                 <span class="c1"># :47</span>
+<span class="k">if</span> <span class="n">lines</span> <span class="ow">and</span> <span class="n">lines</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="o">==</span> <span class="s2">"COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"</span> <span class="ow">and</span> <span class="n">output</span><span class="p">[</span><span class="s2">"returncode"</span><span class="p">]</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>  <span class="c1"># :48</span>
+    <span class="n">submission</span> <span class="o">=</span> <span class="s2">""</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">lines</span><span class="p">[</span><span class="mi">1</span><span class="p">:])</span>                                                 <span class="c1"># :49</span>
+    <span class="k">raise</span> <span class="n">Submitted</span><span class="p">({</span><span class="s2">"role"</span><span class="p">:</span> <span class="s2">"exit"</span><span class="p">,</span> <span class="s2">"content"</span><span class="p">:</span> <span class="n">submission</span><span class="p">,</span>
+                     <span class="s2">"extra"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"exit_status"</span><span class="p">:</span> <span class="s2">"Submitted"</span><span class="p">,</span> <span class="s2">"submission"</span><span class="p">:</span> <span class="n">submission</span><span class="p">}})</span>  <span class="c1"># :50-56</span>
+</code></pre></div>
+
+<p>判定条件三个，缺一不可：<strong>首行</strong>精确等于魔法字符串（前导空白容忍）、返回码为 0、其余行作为 submission。所以提示词反复强调 "Do not combine it with any other command"（<code>mini.yaml:18-19</code>）——<code>echo 哨兵 &amp;&amp; ls</code> 会让首行不再是哨兵；<code>false; echo 哨兵</code> 会让返回码非零。</p>
+<p><strong>为什么检查在环境侧？</strong> 因为"命令输出"只有环境拿得到第一手；agent 看到的已是格式化后的观察。把宝鉴定放在产地，agent 保持纯粹。这也是 m12 里自定义环境必须复制的一段逻辑（Docker 版 140-151 行逐字相同——项目容忍这两份重复，换取每个类的独立可读）。</p>
+<h2>五、DockerEnvironment：容器生命周期</h2>
+<h3>5.1 配置面（15-42 行）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>字段</th>
+<th>默认</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>image</code></td>
+<td>必填</td>
+<td>镜像名</td>
+</tr>
+<tr>
+<td><code>cwd</code></td>
+<td><code>"/"</code></td>
+<td>容器内工作目录（swebench 设为 <code>/testbed</code>）</td>
+</tr>
+<tr>
+<td><code>env</code> / <code>forward_env</code></td>
+<td><code>{}</code> / <code>[]</code></td>
+<td>显式变量 / 从宿主转发的变量名；冲突时 env 优先（21-25 行 docstring）</td>
+</tr>
+<tr>
+<td><code>timeout</code></td>
+<td><code>30</code></td>
+<td>单条命令超时</td>
+</tr>
+<tr>
+<td><code>executable</code></td>
+<td><code>docker</code></td>
+<td>可换 podman（<code>MSWEA_DOCKER_EXECUTABLE</code>）</td>
+</tr>
+<tr>
+<td><code>run_args</code></td>
+<td><code>["--rm"]</code></td>
+<td>容器退出即删除</td>
+</tr>
+<tr>
+<td><code>container_timeout</code></td>
+<td><code>"2h"</code></td>
+<td>容器最长存活（sleep 的参数）</td>
+</tr>
+<tr>
+<td><code>pull_timeout</code></td>
+<td><code>120</code></td>
+<td>拉镜像超时</td>
+</tr>
+<tr>
+<td><code>interpreter</code></td>
+<td><code>["bash", "-lc"]</code></td>
+<td>命令解释器，可改 python 等</td>
+</tr>
+</tbody>
+</table></div>
+<h3>5.2 启动：一个 sleep 撑起的长容器（74-99 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="n">cmd</span> <span class="o">=</span> <span class="p">[</span><span class="n">executable</span><span class="p">,</span> <span class="s2">"run"</span><span class="p">,</span> <span class="s2">"-d"</span><span class="p">,</span> <span class="s2">"--name"</span><span class="p">,</span> <span class="n">container_name</span><span class="p">,</span> <span class="s2">"-w"</span><span class="p">,</span> <span class="n">cwd</span><span class="p">,</span>
+       <span class="o">*</span><span class="n">run_args</span><span class="p">,</span> <span class="n">image</span><span class="p">,</span> <span class="s2">"sleep"</span><span class="p">,</span> <span class="n">container_timeout</span><span class="p">]</span>     <span class="c1"># :77-89</span>
+</code></pre></div>
+
+<p>容器的主进程是 <code>sleep 2h</code>——一个什么都不干、只是活着的过程。之后每条命令都是 <code>docker exec</code> 进这个容器新开 shell（107-113 行）：</p>
+<div class="codehilite"><pre><span></span><code><span class="n">cmd</span> <span class="o">=</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">executable</span><span class="p">,</span> <span class="s2">"exec"</span><span class="p">,</span> <span class="s2">"-w"</span><span class="p">,</span> <span class="n">cwd</span><span class="p">]</span>        <span class="c1"># :107</span>
+<span class="c1"># forward_env 与 env 转成 -e KEY=VALUE                    :108-112</span>
+<span class="n">cmd</span><span class="o">.</span><span class="n">extend</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">container_id</span><span class="p">,</span> <span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">interpreter</span><span class="p">,</span> <span class="n">command</span><span class="p">])</span>  <span class="c1"># :113</span>
+</code></pre></div>
+
+<p>对照本地版：<code>Popen(command, shell=True)</code> 变成 <code>subprocess.run([docker, exec, ..., bash, -lc, command])</code>。<strong>执行语义完全一致</strong>（独立子壳、合并 stderr、超时包成 returncode -1），这就是"换环境不换 agent"的实证。116-124 行用 <code>subprocess.run</code> 而非 <code>_run</code>——容器内超时由 docker 自己收拾进程，宿主无需 killpg。</p>
+<h3>5.3 销毁：异步兜底（153-161 行）</h3>
+<div class="codehilite"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">cleanup</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="k">if</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">"container_id"</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>   <span class="c1"># :155  init 早期失败时属性可能不存在</span>
+        <span class="n">cmd</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">"(timeout 60 </span><span class="si">{</span><span class="n">executable</span><span class="si">}</span><span class="s2"> stop </span><span class="si">{</span><span class="nb">id</span><span class="si">}</span><span class="s2"> || </span><span class="si">{</span><span class="n">executable</span><span class="si">}</span><span class="s2"> rm -f </span><span class="si">{</span><span class="nb">id</span><span class="si">}</span><span class="s2">) &gt;/dev/null 2&gt;&amp;1 &amp;"</span>  <span class="c1"># :156</span>
+        <span class="n">subprocess</span><span class="o">.</span><span class="n">Popen</span><span class="p">(</span><span class="n">cmd</span><span class="p">,</span> <span class="n">shell</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>                 <span class="c1"># :157</span>
+
+<span class="k">def</span><span class="w"> </span><span class="fm">__del__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">cleanup</span><span class="p">()</span>                                        <span class="c1"># :159-161</span>
+</code></pre></div>
+
+<p><code>stop</code> 给 60 秒宽限，不停就 <code>rm -f</code> 强删；整个命令后台执行，不阻塞退出。<code>__del__</code> 挂钩保证对象回收时容器不会泄漏。加上 <code>--rm</code> 与 <code>sleep 2h</code>，容器有三重死法：正常清理、超时自杀、退出随删——评测集群里不会堆积僵尸容器。</p>
+<h2>六、其余环境：同一协议的变奏</h2>
+<ul>
+<li><strong>Singularity</strong>（<code>singularity.py</code>）：没有 daemon，先把镜像 build 成 sandbox 目录（46-65 行），失败重试 3 次（<code>sandbox_build_retries</code>，29-30 行），之后 <code>singularity exec</code> 进目录执行。默认 <code>--contain --cleanenv --fakeroot</code>（33 行）做隔离。HPC 集群的普通用户用不了 Docker，这是为他们准备的。</li>
+<li><strong>Bubblewrap</strong>（<code>extra/bubblewrap.py</code>）：Linux 非特权沙箱，<code>wrapper_args</code> 默认只读绑定 <code>/usr /bin /lib /lib64 /etc</code>、tmpfs 挂 <code>/tmp</code>、<code>--unshare-user-try</code>（38-65 行）。文件头两个 warning：实验性、不支持 Windows（6-10 行）。</li>
+<li><em><em>swerex_</em> / contree</em>*：把 execute 委托给 SWE-ReX 执行服务或 Contree SDK，用于远程主机与云沙箱（Modal）。协议不变，只是 subprocess 换成了 RPC。</li>
+</ul>
+<h2>七、无状态子壳：一次回顾</h2>
+<p>现在可以把 m01 的支柱二落到代码了：本地版每条命令 <code>Popen(shell=True)</code> 新进程，Docker 版每条命令 <code>docker exec</code> 新 shell。<strong>没有任何 shell 状态跨命令存活</strong>。提示词把这个约束如实告知模型并教绕过技巧（<code>mini.yaml:39-40</code>），换来的是：</p>
+<ul>
+<li>环境实现可互换（本章五个实现同协议）；</li>
+<li>并发安全（无线程间共享 shell）；</li>
+<li>超时干净（进程组/容器边界即清理边界）；</li>
+<li>轨迹可重放（每条命令自包含，不依赖前序 shell 状态）。</li>
+</ul>
+<h2>八、小结</h2>
+<ul>
+<li>execute 的契约：进 action dict，出 output dict；执行异常包成数据（returncode -1），只有 Submitted 穿透。</li>
+<li>本地版精髓在 <code>_run</code>：新会话 + killpg 杀整组 + 超时保留部分输出。</li>
+<li>哨兵三条件：首行精确匹配、返回码 0、余行即 submission；检查在环境侧，agent 无感。</li>
+<li>Docker 版 = sleep 长容器 + 逐条 exec + 三重销毁兜底；与本地版执行语义逐项对齐。</li>
+<li>下一章把用户请进循环：human/confirm/yolo 三模式与中断恢复。</li>
+</ul>
+<div class="pager"><a href="m06-actions.html"><span class="dir">← 上一章</span>动作解析 —— 一个 bash 工具打天下</a><a class="next" href="m08-interactive.html"><span class="dir">下一章 →</span>交互模式 —— human/confirm/yolo 三态</a></div>
+  </div>
+</div>
+</div>
+<script>function toggleTheme(){var h=document.documentElement;
+var t=h.dataset.theme==="dark"?"light":"dark";h.dataset.theme=t;localStorage.setItem("theme",t);}</script>
+</body>
+</html>
