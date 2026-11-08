@@ -2,7 +2,7 @@
 
 Usage:
     pip install markdown pygments
-    python book/build.py
+    python build.py
 """
 
 import math
@@ -145,7 +145,7 @@ index_body = f"""<div class="hero">
 <div class="colophon">
 <p>本书风格致敬 <a href="https://github.com/Daniel-csvw/pi-agent-book">pi-agent-book</a>：中文写作、引子带问题、术语先对齐、全景后精读、行号可验证。
 源码版权归 mini-swe-agent 项目（MIT License）所有；本书为学习用途的源码解读。</p>
-<p>Markdown 源文件在 <code>book/markdown/</code>，改动后运行 <code>python book/build.py</code> 重新生成本站。</p>
+<p>Markdown 源文件在 <code>markdown/</code>，改动后运行 <code>python build.py</code> 重新生成本站。</p>
 </div>"""
 
 (book_dir / "index.html").write_text(
