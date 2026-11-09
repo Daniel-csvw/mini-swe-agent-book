@@ -1,4 +1,4 @@
-# 包地图 —— 五个目录，三个协议
+# 包地图 —— 五个核心目录，三个协议
 
 > 本章源文件：`src/minisweagent/__init__.py`、`pyproject.toml`、三个组件目录的 `__init__.py`。
 

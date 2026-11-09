@@ -86,9 +86,9 @@ if lines and lines[0].strip() == "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" and out
                      "extra": {"exit_status": "Submitted", "submission": submission}})  # :50-56
 ```
 
-判定条件三个，缺一不可：**首行**精确等于魔法字符串（前导空白容忍）、返回码为 0、其余行作为 submission。所以提示词反复强调 "Do not combine it with any other command"（`mini.yaml:18-19`）——`echo 哨兵 && ls` 会让首行不再是哨兵；`false; echo 哨兵` 会让返回码非零。
+判定条件两个，缺一不可：**首行**精确等于魔法字符串（前导空白容忍）、返回码为 0；其余行则作为 submission 带走。所以提示词反复强调 "Do not combine it with any other command"（`mini.yaml:18-19`）——`echo 哨兵 && ls` 会让首行不再是哨兵；`false; echo 哨兵` 会让返回码非零。
 
-**为什么检查在环境侧？** 因为"命令输出"只有环境拿得到第一手；agent 看到的已是格式化后的观察。把宝鉴定放在产地，agent 保持纯粹。这也是 m12 里自定义环境必须复制的一段逻辑（Docker 版 140-151 行逐字相同——项目容忍这两份重复，换取每个类的独立可读）。
+**为什么检查在环境侧？** 因为"命令输出"只有环境拿得到第一手；agent 看到的已是格式化后的观察。在产地完成鉴定，agent 保持纯粹。这也是 m12 里自定义环境必须复制的一段逻辑（Docker 版 140-151 行逐字相同——项目容忍这两份重复，换取每个类的独立可读）。
 
 ## 五、DockerEnvironment：容器生命周期
 
@@ -121,7 +121,7 @@ cmd = [self.config.executable, "exec", "-w", cwd]        # :107
 cmd.extend([self.container_id, *self.config.interpreter, command])  # :113
 ```
 
-对照本地版：`Popen(command, shell=True)` 变成 `subprocess.run([docker, exec, ..., bash, -lc, command])`。**执行语义完全一致**（独立子壳、合并 stderr、超时包成 returncode -1），这就是"换环境不换 agent"的实证。116-124 行用 `subprocess.run` 而非 `_run`——容器内超时由 docker 自己收拾进程，宿主无需 killpg。
+对照本地版：`Popen(command, shell=True)` 变成 `subprocess.run([docker, exec, ..., bash, -lc, command])`。**执行语义基本一致**（独立子壳、合并 stderr、超时包成 returncode -1），这就是"换环境不换 agent"的实证。一个真实差异在超时清理：116-124 行用 `subprocess.run` 而非 `_run`，超时杀掉的只是宿主侧的 `docker exec` 客户端，**容器内已启动的进程不保证随之终止**——本地版的 killpg 清理保证在这里没有等价物。
 
 ### 5.3 销毁：异步兜底（153-161 行）
 
@@ -135,7 +135,7 @@ def __del__(self):
     self.cleanup()                                        # :159-161
 ```
 
-`stop` 给 60 秒宽限，不停就 `rm -f` 强删；整个命令后台执行，不阻塞退出。`__del__` 挂钩保证对象回收时容器不会泄漏。加上 `--rm` 与 `sleep 2h`，容器有三重死法：正常清理、超时自杀、退出随删——评测集群里不会堆积僵尸容器。
+`timeout 60` 兜底整个 `stop` 命令——60 秒还没停掉就 `rm -f` 强删（注意 `docker stop` 自身的默认宽限是 10 秒，60 秒不是给容器的宽限期）；整个命令后台执行，不阻塞退出。`__del__` 挂钩保证对象回收时容器不会泄漏。加上 `--rm` 与 `sleep 2h`，容器有三重死法：正常清理、超时自杀、退出随删——评测集群里不会堆积僵尸容器。
 
 ## 六、其余环境：同一协议的变奏
 

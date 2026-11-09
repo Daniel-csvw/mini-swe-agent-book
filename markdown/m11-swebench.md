@@ -44,7 +44,7 @@ remove_from_preds_file(output_dir / "preds.json", instance_id)      # :132
 (instance_dir / f"{instance_id}.traj.json").unlink(missing_ok=True) # :133
 ```
 
-注释说明意图（131 行）：避免上次失败的残留造成不一致状态。**先删旧结果再开跑**——配合后面的"跳过已完成"逻辑，preds.json 里的条目永远代表完整成功的运行。
+注释说明意图（131 行）：避免上次失败的残留造成不一致状态。**先删旧结果再开跑**——上次跑到一半崩溃（没来得及写 preds）的 instance 因此不会被误判为已完成。注意 preds.json 的条目代表"跑完了"而非"跑成功了"：失败 instance 同样写入（patch 为空串，见 4.4）。
 
 ### 4.2 环境：镜像名里的魔法（68-94 行）
 
@@ -54,7 +54,7 @@ remove_from_preds_file(output_dir / "preds.json", instance_id)      # :132
 
 ### 4.3 跑 agent：ProgressTrackingAgent（145-156 行）
 
-批量跑用的不是 DefaultAgent 而是 `ProgressTrackingAgent`（`utils/common.py:7-17`）——只覆写 step，先报一句 `Step N ($cost)` 再调父类。m03 说过 step 是子类的标准插头，这是最简实证。
+批量跑用的不是 DefaultAgent 而是 `ProgressTrackingAgent`（`utils/common.py:7-17`）——覆写 `__init__` 收下 progress_manager 与 instance_id（10-13 行），再覆写 step 先报一句 `Step N ($cost)` 再调父类（15-17 行）。m03 说过 step 是子类的标准插头，这是最简实证。
 
 ### 4.4 收尾：finally 里的三件事（157-177 行）
 
@@ -105,7 +105,7 @@ if not redo_existing and (output_path / "preds.json").exists():
     instances = [i for i in instances if i["instance_id"] not in existing_instances]
 ```
 
-**同一输出目录重跑同一命令 = 只补未完成**。想重跑全部加 `--redo-existing`。配合 4.1 的"先清场"，中断重跑不会留下半旧半新的结果。
+**同一输出目录重跑同一命令 = 跳过 preds.json 里已有的一切**。注意"已有"包括失败 instance（4.4 里失败也写入、patch 为空串）——所以失败默认**不会**重试；想重跑失败或全部，加 `--redo-existing`，或手动从 preds.json 删掉对应键。配合 4.1 的"先清场"，中断重跑不会留下半旧半新的结果。
 
 ### 6.2 筛选（filter_instances，180-197 行）
 
@@ -134,6 +134,6 @@ if not redo_existing and (output_path / "preds.json").exists():
 
 - 批量跑 = 数据集加载 → 筛选/续跑 → 线程池 → 每实例独立容器与轨迹 → preds.json 汇总。
 - 线程安全三处锁：结果文件、全局统计、进度管理；失败实例以异常类名记 exit_status，不拖垮批次。
-- 断点续跑靠 preds.json 键集合 + 开跑先清场；洗牌固定 seed 42 可复现。
+- 断点续跑靠 preds.json 键集合 + 开跑先清场；失败实例也在键集合里，默认不重试（`--redo-existing` 重来）；洗牌固定 seed 42 可复现。
 - 评测提示词的关键护栏：250 步封顶、/testbed、BASH_ENV 激活 conda、patch 提交三条件。
 - 最后一章：不改源码，把这些组件换成你自己的。

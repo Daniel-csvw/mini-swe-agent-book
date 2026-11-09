@@ -70,6 +70,7 @@ run(task)                          default.py:88
 
 ```python
 self.messages: list[dict] = []            # :42  线性历史，只增不减
+self.extra_template_vars = {}             # :45  模板变量的额外来源（run 时注入 task）
 self.cost = 0.0                           # :47  本实例累计成本
 self.n_calls = 0                          # :48  模型调用次数
 self.n_consecutive_format_errors = 0      # :49  连续格式错误计数
@@ -126,7 +127,7 @@ except FormatError as e:
         self.add_messages(*e.messages)                             # :114
 ```
 
-- **102 行的注释揭示了一个契约**：模型类在解析失败时，必须把已产生的成本塞进 FormatError 的消息里（`litellm_model.py:87-98` 履行它），因为正常路径上 `query()` 的 150 行计费没机会执行。钱花了就得记账，哪怕输出是废的。
+- **101 行的注释揭示了一个契约**：模型类在解析失败时，必须把已产生的成本塞进 FormatError 的消息里（`litellm_model.py:87-98` 履行它），因为正常路径上 `query()` 的 150 行计费没机会执行。钱花了就得记账，哪怕输出是废的。
 - 连续计数在**任何干净 step 后清零**（99 行）——惩罚的是"屡教不改"，不是"偶尔犯错"。
 - 达到上限时追加 `RepeatedFormatError` 的 exit 消息；没达到就只追加纠错消息（role=user），下一轮模型会读到纠错指引（模板见 m04）。
 

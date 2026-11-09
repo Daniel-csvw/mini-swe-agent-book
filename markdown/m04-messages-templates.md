@@ -128,11 +128,11 @@ return recursive_merge(
 return Template(template, undefined=StrictUndefined).render(**self.get_template_vars())
 ```
 
-Jinja 默认对未定义变量渲染成空字符串；`StrictUndefined` 则直接抛 `UndefinedError`。这是刻选择：**提示词里悄悄少一块比响亮地报错危险得多**。观察模板、错误模板同样全部用 StrictUndefined（`actions_toolcall.py:44/69/92`、`actions_text.py:30/53`）。
+Jinja 默认对未定义变量渲染成空字符串；`StrictUndefined` 则直接抛 `UndefinedError`。这是刻意选择：**提示词里悄悄少一块比响亮地报错危险得多**。观察模板、错误模板同样全部用 StrictUndefined（`actions_toolcall.py:44/69/92`、`actions_text.py:30/53`）。
 
 ## 六、两份内置模板：toolcall 与 textbased 的对照
 
-配置目录里 `mini.yaml`（CLI 默认，toolcall 路线）与 `default.yaml`（hello_world 默认，textbased 路线）是同一份提示词的两种方言。
+配置目录里 `mini.yaml`（CLI 默认，toolcall 路线）与 `default.yaml`（textbased 风格）是同一份提示词的两种方言。一个容易误会的点：`default.yaml` 是 `hello_world.py:35` 借用的 agent 模板，但 hello_world 的模型类其实是 LitellmModel（toolcall 路线，`hello_world.py:33`）——**模板风格与模型路线并不强绑定**；真正配 textbased 模型类的 CLI 配置另有 `mini_textbased.yaml`。
 
 ### 6.1 system_template：一句话 vs 一段格式法
 
@@ -142,7 +142,7 @@ Jinja 默认对未定义变量渲染成空字符串；`StrictUndefined` 则直�
 
 ### 6.2 instance_template：同构的五段式
 
-两份的任务模板结构一致（`mini.yaml:4-100`）：
+`mini.yaml:4-100` 的任务模板是五段式（`default.yaml` 大致同构，但多出一节 "Formatting your response" 的完整示例，`default.yaml:46-56`——textbased 风格需要更多格式示范）：
 
 1. `Please solve this issue: {{task}}` —— 任务注入点；
 2. Recommended Workflow：读代码 → 写复现脚本 → 改源码 → 再跑脚本 → 测边界 → 提交（六步）；
@@ -169,12 +169,14 @@ Jinja 默认对未定义变量渲染成空字符串；`StrictUndefined` 则直�
 `mini.yaml:129-149` 有个精妙的分支（130 行）：
 
 ```text
-{% if finish_reason == "length" or (finish_reason == "tool_calls" and not has_tool_calls) %}
+{% if finish_reason is defined and (finish_reason == "length" or (finish_reason == "tool_calls" and not has_tool_calls)) %}
     → "你的输出被 token 上限截断了，说简短点，以一个 bash tool call 结尾"
 {% else %}
     → 通用格式纠错 + 正确调用示例
 {% endif %}
 ```
+
+`finish_reason is defined` 守卫不可省：StrictUndefined 下，不传 `finish_reason` 的调用方会让无守卫的模板直接抛 `UndefinedError`；有了守卫，未传时短路进 else 分支。
 
 模型没产出工具调用，**不一定是格式错误，也可能是话太长被截了**（`finish_reason="length"`）。两种情况的纠正策略完全不同：前者要教格式，后者要教模型长话短说。模板变量 `finish_reason` 由解析器传入（`actions_toolcall.py:31-37` 的 `template_kwargs`），Responses API 路线还专门做了状态映射（`actions_toolcall_response.py:45-55`）。
 

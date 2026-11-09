@@ -35,21 +35,21 @@ document.documentElement.dataset.theme=t;})();</script>
 <div class="hero">
 <h1>mini-swe-agent 源码教程</h1>
 <p class="tagline">一百行代码，74% 的 SWE-bench —— 把最简单的 coding agent 逐行拆开。</p>
-<p class="stats">基于 v2.4.6 · 12 章 · 共约 221 分钟 · 全部引用可核对行号</p>
+<p class="stats">基于 v2.4.6 · 12 章 · 共约 226 分钟 · 全部引用可核对行号</p>
 </div>
 <div class="cards">
 <a class="card" href="modules/m01-overview.html"><span class="no">M01</span><h3>概览 —— 一百行代码，74% 的 SWE-bench</h3><p>概览：一百行代码与 74% 的成绩单，三根设计支柱与 v1→v2 沿革。</p><span class="rt">约 15 分钟</span></a>
-<a class="card" href="modules/m02-package-map.html"><span class="no">M02</span><h3>包地图 —— 五个目录，三个协议</h3><p>包地图：五个目录、三个协议、依赖清单与程序入口。</p><span class="rt">约 21 分钟</span></a>
+<a class="card" href="modules/m02-package-map.html"><span class="no">M02</span><h3>包地图 —— 五个核心目录，三个协议</h3><p>包地图：五个核心目录、三个协议、依赖清单与程序入口。</p><span class="rt">约 21 分钟</span></a>
 <a class="card" href="modules/m03-agent-loop.html"><span class="no">M03</span><h3>Agent 循环 —— 异常是唯一的控制流</h3><p>Agent 循环：run/step/query/execute_actions，异常是唯一的控制流。</p><span class="rt">约 25 分钟</span></a>
-<a class="card" href="modules/m04-messages-templates.html"><span class="no">M04</span><h3>消息与模板 —— 一切皆 dict，渲染靠 Jinja</h3><p>消息与模板：extra 元数据袋、六层模板变量、观察截断的艺术。</p><span class="rt">约 20 分钟</span></a>
+<a class="card" href="modules/m04-messages-templates.html"><span class="no">M04</span><h3>消息与模板 —— 一切皆 dict，渲染靠 Jinja</h3><p>消息与模板：extra 元数据袋、六层模板变量、观察截断的艺术。</p><span class="rt">约 21 分钟</span></a>
 <a class="card" href="modules/m05-model-call.html"><span class="no">M05</span><h3>模型调用 —— 重试、计费与格式错误契约</h3><p>模型调用：消息清洗、重试节奏、两级限额、FormatError 契约。</p><span class="rt">约 19 分钟</span></a>
 <a class="card" href="modules/m06-actions.html"><span class="no">M06</span><h3>动作解析 —— 一个 bash 工具打天下</h3><p>动作解析：toolcall / textbased / Responses API 三条路线一个产物。</p><span class="rt">约 21 分钟</span></a>
 <a class="card" href="modules/m07-environments.html"><span class="no">M07</span><h3>环境 —— 子壳、哨兵与进程组</h3><p>环境：子壳执行、哨兵命令、进程组击杀、Docker 生命周期。</p><span class="rt">约 20 分钟</span></a>
 <a class="card" href="modules/m08-interactive.html"><span class="no">M08</span><h3>交互模式 —— human/confirm/yolo 三态</h3><p>交互模式：human/confirm/yolo 三态、Ctrl-C 插话、限额提额。</p><span class="rt">约 18 分钟</span></a>
 <a class="card" href="modules/m09-config.html"><span class="no">M09</span><h3>配置系统 —— YAML、UNSET 与递归合并</h3><p>配置系统：YAML 查找、键值对解析、UNSET 哨兵与三个工厂。</p><span class="rt">约 17 分钟</span></a>
-<a class="card" href="modules/m10-trajectory.html"><span class="no">M10</span><h3>轨迹持久化 —— traj.json 与 inspector</h3><p>轨迹持久化：traj.json 解剖、每步落盘、inspector 回放。</p><span class="rt">约 13 分钟</span></a>
-<a class="card" href="modules/m11-swebench.html"><span class="no">M11</span><h3>基准测试 —— 批量跑 SWE-bench 的工程细节</h3><p>基准测试：instance 旅程、并发三处锁、断点续跑、评测提示词。</p><span class="rt">约 17 分钟</span></a>
-<a class="card" href="modules/m12-extending.html"><span class="no">M12</span><h3>扩展指南 —— 写你自己的 Model/Environment/Agent</h3><p>扩展指南：协议契约、确定性模型、元模型、不改源码接线。</p><span class="rt">约 15 分钟</span></a>
+<a class="card" href="modules/m10-trajectory.html"><span class="no">M10</span><h3>轨迹持久化 —— traj.json 与 inspector</h3><p>轨迹持久化：traj.json 解剖、每步落盘、inspector 回放。</p><span class="rt">约 15 分钟</span></a>
+<a class="card" href="modules/m11-swebench.html"><span class="no">M11</span><h3>基准测试 —— 批量跑 SWE-bench 的工程细节</h3><p>基准测试：instance 旅程、并发三处锁、断点续跑、评测提示词。</p><span class="rt">约 18 分钟</span></a>
+<a class="card" href="modules/m12-extending.html"><span class="no">M12</span><h3>扩展指南 —— 写你自己的 Model/Environment/Agent</h3><p>扩展指南：协议契约、确定性模型、元模型、不改源码接线。</p><span class="rt">约 16 分钟</span></a>
 </div>
 <div class="colophon">
 <p>本书风格致敬 <a href="https://github.com/Daniel-csvw/pi-agent-book">pi-agent-book</a>：中文写作、引子带问题、术语先对齐、全景后精读、行号可验证。

@@ -72,7 +72,7 @@ except LimitsExceeded:
 
 - **TimeExceeded 直接放行**（75-79 行）：注释解释——墙钟超限不是提额能救的，重查会再次撞钟，问用户只会无限循环。所以干净地停。
 - **LimitsExceeded 先查有没有终端**（81-87 行）：`_stdin_is_interactive`（96-107 行）判断 `sys.stdin.isatty()`。CI 里 `--yolo` 无人值守、stdin 重定向自 `/dev/null` 时，`input()` 会抛 EOFError 把运行搞崩——不如直接停，轨迹里留下 LimitsExceeded 死因。
-- 有终端才问新限额，然后**递归重查**（94 行）：新限额生效，这次调用不算浪费。
+- 有终端才问新限额，然后**调父类重新查询**（94 行 `super().query()`，不是自递归）：新限额生效，这次调用不算浪费。
 
 ## 五、step：Ctrl-C 不是终止，是插话（109-122 行）
 
@@ -82,7 +82,10 @@ try:
     return super().step()
 except KeyboardInterrupt:
     interruption_message = self._prompt_and_handle_slash_commands(
-        "Interrupted. Type a comment/command (/h for available commands) > ").strip()  # :115-119
+        "\n\n[bold yellow]Interrupted.[/bold yellow] "
+        "[green]Type a comment/command[/green] (/h for available commands)"
+        "\n[bold yellow]>[/bold yellow] "
+    ).strip()                                    # :115-119
     if not interruption_message or interruption_message in self._MODE_COMMANDS_MAPPING:
         interruption_message = "Temporary interruption caught."              # :120-121
     self._interrupt(f"Interrupted by user: {interruption_message}")          # :122

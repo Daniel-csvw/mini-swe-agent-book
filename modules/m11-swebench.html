@@ -33,7 +33,7 @@ document.documentElement.dataset.theme=t;})();</script>
   <div class="topbar"><button class="theme-toggle" onclick="toggleTheme()">切换明暗</button></div>
   <div class="content">
 <h1>基准测试 —— 批量跑 SWE-bench 的工程细节</h1>
-<p class="meta">约 17 分钟读完</p><blockquote>
+<p class="meta">约 18 分钟读完</p><blockquote>
 <p>本章源文件：<code>run/benchmarks/swebench.py</code>（275 行）、<code>swebench_single.py</code>（100 行）、<code>utils/batch_progress.py</code>（178 行）、<code>utils/common.py</code>（17 行）、<code>config/benchmarks/swebench.yaml</code>（183 行）。</p>
 </blockquote>
 <h2>一、引子：74% 是怎么跑出来的</h2>
@@ -93,12 +93,12 @@ document.documentElement.dataset.theme=t;})();</script>
 <span class="p">(</span><span class="n">instance_dir</span> <span class="o">/</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">instance_id</span><span class="si">}</span><span class="s2">.traj.json"</span><span class="p">)</span><span class="o">.</span><span class="n">unlink</span><span class="p">(</span><span class="n">missing_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span> <span class="c1"># :133</span>
 </code></pre></div>
 
-<p>注释说明意图（131 行）：避免上次失败的残留造成不一致状态。<strong>先删旧结果再开跑</strong>——配合后面的"跳过已完成"逻辑，preds.json 里的条目永远代表完整成功的运行。</p>
+<p>注释说明意图（131 行）：避免上次失败的残留造成不一致状态。<strong>先删旧结果再开跑</strong>——上次跑到一半崩溃（没来得及写 preds）的 instance 因此不会被误判为已完成。注意 preds.json 的条目代表"跑完了"而非"跑成功了"：失败 instance 同样写入（patch 为空串，见 4.4）。</p>
 <h3>4.2 环境：镜像名里的魔法（68-94 行）</h3>
 <p><code>get_swebench_docker_image_name</code>（68-76 行）：instance 自带镜像名就用，否则按约定构造 <code>docker.io/swebench/sweb.eval.x86_64.{id}:latest</code>。Docker 镜像名不允许双下划线，所以 instance_id 里的 <code>__</code> 替换成 <code>_1776_</code>（74 行，注释自称 magic token）。</p>
 <p><code>get_sb_environment</code>（79-94 行）：默认 docker；singularity/contree 要加 <code>docker://</code> 前缀（85-86 行）；支持 <code>env_startup_command</code>——用 instance 字段渲染后先跑一条初始化命令，非零返回码直接抛错（89-93 行）。</p>
 <h3>4.3 跑 agent：ProgressTrackingAgent（145-156 行）</h3>
-<p>批量跑用的不是 DefaultAgent 而是 <code>ProgressTrackingAgent</code>（<code>utils/common.py:7-17</code>）——只覆写 step，先报一句 <code>Step N ($cost)</code> 再调父类。m03 说过 step 是子类的标准插头，这是最简实证。</p>
+<p>批量跑用的不是 DefaultAgent 而是 <code>ProgressTrackingAgent</code>（<code>utils/common.py:7-17</code>）——覆写 <code>__init__</code> 收下 progress_manager 与 instance_id（10-13 行），再覆写 step 先报一句 <code>Step N ($cost)</code> 再调父类（15-17 行）。m03 说过 step 是子类的标准插头，这是最简实证。</p>
 <h3>4.4 收尾：finally 里的三件事（157-177 行）</h3>
 <div class="codehilite"><pre><span></span><code><span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
     <span class="n">exit_status</span><span class="p">,</span> <span class="n">result</span> <span class="o">=</span> <span class="nb">type</span><span class="p">(</span><span class="n">e</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span><span class="p">,</span> <span class="s2">""</span>                       <span class="c1"># :159</span>
@@ -153,7 +153,7 @@ document.documentElement.dataset.theme=t;})();</script>
     <span class="n">instances</span> <span class="o">=</span> <span class="p">[</span><span class="n">i</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">instances</span> <span class="k">if</span> <span class="n">i</span><span class="p">[</span><span class="s2">"instance_id"</span><span class="p">]</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">existing_instances</span><span class="p">]</span>
 </code></pre></div>
 
-<p><strong>同一输出目录重跑同一命令 = 只补未完成</strong>。想重跑全部加 <code>--redo-existing</code>。配合 4.1 的"先清场"，中断重跑不会留下半旧半新的结果。</p>
+<p><strong>同一输出目录重跑同一命令 = 跳过 preds.json 里已有的一切</strong>。注意"已有"包括失败 instance（4.4 里失败也写入、patch 为空串）——所以失败默认<strong>不会</strong>重试；想重跑失败或全部，加 <code>--redo-existing</code>，或手动从 preds.json 删掉对应键。配合 4.1 的"先清场"，中断重跑不会留下半旧半新的结果。</p>
 <h3>6.2 筛选（filter_instances，180-197 行）</h3>
 <p>三个操作按序：洗牌（<code>--shuffle</code>，先按 id 排序再 <code>random.seed(42)</code> 洗——<strong>可复现的随机</strong>，184-187 行）→ 正则过滤 instance_id（189 行）→ Python 切片语法 <code>--slice 0:5</code>（192-194 行）。冒烟测试常用 <code>--slice 0:3 --subset lite</code>。</p>
 <h2>七、swebench.yaml：评测专用的提示词工程</h2>
@@ -206,7 +206,7 @@ document.documentElement.dataset.theme=t;})();</script>
 <ul>
 <li>批量跑 = 数据集加载 → 筛选/续跑 → 线程池 → 每实例独立容器与轨迹 → preds.json 汇总。</li>
 <li>线程安全三处锁：结果文件、全局统计、进度管理；失败实例以异常类名记 exit_status，不拖垮批次。</li>
-<li>断点续跑靠 preds.json 键集合 + 开跑先清场；洗牌固定 seed 42 可复现。</li>
+<li>断点续跑靠 preds.json 键集合 + 开跑先清场；失败实例也在键集合里，默认不重试（<code>--redo-existing</code> 重来）；洗牌固定 seed 42 可复现。</li>
 <li>评测提示词的关键护栏：250 步封顶、/testbed、BASH_ENV 激活 conda、patch 提交三条件。</li>
 <li>最后一章：不改源码，把这些组件换成你自己的。</li>
 </ul>

@@ -84,13 +84,14 @@ actions.append({"command": args["command"], "tool_call_id": tool_call.id})
 
 ## 五、路线二：textbased（任何模型都能跑）
 
-### 5.1 子类只改三处（litellm_textbased_model.py，48 行）
+### 5.1 子类只改四处（litellm_textbased_model.py，48 行）
 
 `LitellmTextbasedModel` 继承 `LitellmModel`，差异屈指可数：
 
-1. 配置加 `action_regex`，默认 `r"```mswea_bash_command\s*\n(.*?)\n```"`（8 行）；
+1. 配置加 `action_regex`，默认 `r"```mswea_bash_command\s*\n(.*?)\n```"`（8 行），并覆写 `format_error_template` 为"恰好一个"版（10-13 行）；
 2. `_query` 不传 tools（20-27 行）；
-3. `_parse_actions` 换用正则解析（29-37 行）；观察格式化换成 user 消息版（39-48 行）。
+3. `_parse_actions` 换用正则解析（29-37 行）；
+4. `format_observation_messages` 换成 user 消息版（39-48 行）。
 
 重试、计费、缓存标记、FormatError 契约全部继承——**这就是"每个类都简单，多态提供选择"的实证**。
 
@@ -120,7 +121,7 @@ OpenAI 的 Responses API 消息形状不同：没有 `choices[0].message`，而�
 2. **历史扁平化**：`_prepare_messages_for_api` 把轨迹里的 response 对象拆成 output 项再发（`litellm_response_model.py:29-38`）——无状态端点，每次全量重放；
 3. **finish_reason 映射**：Responses API 用 `status="incomplete"` + `incomplete_details.reason="max_output_tokens"` 表示截断，`finish_reason_from_responses_api`（45-55 行）把它映射成 `"length"`，让 m04 那份格式错误模板无需改动照常工作。
 
-解析校验逻辑与 toolcall 版同构（58-104 行），观察消息是 `type="function_call_output"` + `call_id`（132-135 行）。`LitellmResponseModel.query`（52-78 行）完整继承了重试与 FormatError 契约，只多了 dict/pydantic 双兼容的序列化兜底（62-71 行注释）。
+解析校验逻辑与 toolcall 版同构（58-104 行），观察消息是 `type="function_call_output"` + `call_id`（132-135 行）。注意 `LitellmResponseModel.query`（52-78 行）是**整体覆写重实现**而非继承父类方法——但重试节奏与 FormatError 契约原样保留，只多了 dict/pydantic 双兼容的序列化兜底（62-71 行注释）。
 
 ## 七、观察格式化：未执行的动作也要有交代
 

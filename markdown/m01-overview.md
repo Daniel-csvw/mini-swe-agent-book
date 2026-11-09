@@ -1,6 +1,6 @@
 # 概览 —— 一百行代码，74% 的 SWE-bench
 
-> 本书基于 mini-swe-agent **v2.4.6**（`src/minisweagent/__init__.py:11`）。所有源码引用均为仓库根目录相对路径加行号，可直接跳转核对。
+> 本章事实来源：`README.md`、`docs/advanced/v2_migration.md` 与整个 `src/minisweagent` 包。本书基于 **v2.4.6**（`src/minisweagent/__init__.py:11`），所有引用为仓库根目录相对路径加行号，可直接跳转核对。
 
 ## 一、引子：同一个团队，两次答案
 
@@ -45,7 +45,7 @@
 
 README 说 agent 类"约 100 行"（`README.md:26`），指的是刨去配置类、序列化方法之后的有效逻辑。整个核心链路——入口、循环、模型、环境——加起来不到七百行，且**没有任何重型框架依赖**：没有 LangChain，没有工作流引擎，只有 litellm、pydantic、jinja2 这类单一职责的工具库（`pyproject.toml:33-48`）。
 
-项目结构五个目录，各管一件事：
+项目结构五个核心目录，各管一件事（`utils/` 是公共辅助，不算主格）：
 
 ```text
 src/minisweagent/
@@ -58,7 +58,7 @@ src/minisweagent/
 └── utils/           # 日志、递归合并等小工具
 ```
 
-记住这个五分法，后面每一章都落在其中一格上。
+记住这五个核心目录，后面每一章都落在其中一格上。
 
 ## 四、三根设计支柱
 
@@ -102,7 +102,7 @@ mini 用 `subprocess` 执行动作，**每条命令完全独立**，不维护一
 
 | 维度 | v1 | v2（本书） |
 |---|---|---|
-| 动作传递 | 正则解析 ```` ```mswea_bash_command ```` 代码块 | 原生 tool call 为默认，textbased 保留为备选 |
+| 动作传递 | 正则解析 ```` ```bash ```` 代码块（`v2_migration.md:48`） | 原生 tool call 为默认，textbased 保留为备选（正则改用 ```` ```mswea_bash_command ````） |
 | 动作解析职责 | agent 管 | **模型类管**——换模型类即换解析方式（`v2_migration.md:166`） |
 | 成本记账 | model 持有 | **agent 持有**，model 无状态化（`v2_migration.md:168`） |
 | 配置类 | dataclass | pydantic `BaseModel`（`v2_migration.md:170`） |
@@ -118,7 +118,7 @@ mini 用 `subprocess` 执行动作，**每条命令完全独立**，不维护一
 
 | 章 | 主题 | 一句话 |
 |---|---|---|
-| m02 | 包地图 | 五个目录、三个协议、依赖与入口 |
+| m02 | 包地图 | 五个核心目录、三个协议、依赖与入口 |
 | m03 | Agent 循环 | `run/step/query/execute_actions` 与异常控制流 |
 | m04 | 消息与模板 | 消息结构、`extra`、Jinja 模板变量从哪来 |
 | m05 | 模型调用 | 重试、成本核算、FormatError 契约 |

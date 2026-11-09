@@ -20,7 +20,26 @@
 | inspector | `mini-extra inspect`，textual 写的终端轨迹浏览器 |
 | step（inspector 语义） | 一条助手消息 + 紧随其后的观察消息，作为一页展示 |
 
-## 三、serialize：轨迹的解剖（default.py:159-180）
+## 三、全景：从内存到磁盘再到眼睛
+
+```text
+DefaultAgent.run 循环                         default.py:88-124
+   │  每步 finally
+   ▼
+agent.save(output_path)                       default.py:120-121 → 182-190
+   │  serialize()：info + messages + format   :159-180
+   │  再合并 model.serialize()、env.serialize()、调用方 extra
+   ▼
+*.traj.json（每步全量重写）
+   │
+   ├─→ mini-extra inspect：textual 翻页回放    inspector.py:296-312
+   ├─→ m11 批量评测：取 submission 写 preds.json
+   └─→ 微调/RL：线性历史直接当训练数据
+```
+
+一条"不加工"的管道：内存里的 messages 原样落盘，下游三个消费者各取所需。下面按管道顺序精读。
+
+## 四、serialize：轨迹的解剖（default.py:159-180）
 
 ```python
 agent_data = {
@@ -45,7 +64,7 @@ return recursive_merge(agent_data, self.model.serialize(), self.env.serialize(),
 - 180 行的合并顺序：agent 基底 → 模型元数据 → 环境元数据 → 调用方 extra。m11 的批量跑就是靠最后的 `*extra_dicts` 塞进 `instance_id` 和覆写 exit_status；
 - `messages` **原样**落盘，含全部 extra（原始响应、未截断输出、成本、时间戳）——m04 的"两个视图"在这里闭合。
 
-## 四、save：每步都落盘（182-190 行）
+## 五、save：每步都落盘（182-190 行）
 
 ```python
 def save(self, path: Path | None, *extra_dicts) -> dict:
@@ -64,11 +83,11 @@ def save(self, path: Path | None, *extra_dicts) -> dict:
 
 代价是每步全量重写 JSON。对几百步的轨迹这是几十毫秒级开销，相比模型调用的秒级延迟可忽略——又是"简单优先"的取舍。
 
-## 五、inspector：终端里的轨迹浏览器
+## 六、inspector：终端里的轨迹浏览器
 
 `mini-extra inspect [path]`（`inspector.py:296-312`）：path 是文件就直接看，是目录就 `rglob("*.traj.json")` 收集全部轨迹排序看（305 行）。textual App，vim 风格键位。
 
-### 5.1 消息怎么切成"步"（_messages_to_steps，25-38 行）
+### 6.1 消息怎么切成"步"（_messages_to_steps，25-38 行）
 
 ```python
 for message in messages:
@@ -81,7 +100,7 @@ for message in messages:
 
 遇到助手消息（或带 actions 的消息——human 模式的用户命令）就开新页，其余消息（观察、纠错、插话）归入当前页。**一页 = 模型的一次决策 + 其全部后果**，正好是回顾时的自然单位。开头的 system/user 两条消息自成第 0 页。
 
-### 5.2 键位表（81-95 行）
+### 6.2 键位表（81-95 行）
 
 | 键 | 动作 | 键 | 动作 |
 |---|---|---|---|
@@ -93,11 +112,11 @@ for message in messages:
 
 索引设置器自动夹取边界并回滚顶部（121-127、139-146 行）——翻到头不会炸。`e` 键把当前步 dump 成临时 JSON 调 `jless`（255-272 行），看 extra 里的原始响应最方便。
 
-### 5.3 渲染：复用 get_content_string（195-225 行）
+### 6.3 渲染：复用 get_content_string（195-225 行）
 
 每条消息的展示文本来自 `get_content_string`（m08 提过，`content_string.py:32-87`）：字符串 content、多模态块、tool_use/tool_result、OpenAI tool_calls、Responses output 都能提取；观察 JSON 还会被美化成键值分段（`_format_observation`，17-29 行）。assistant 的 `reasoning_content` 单独分块展示（213-219 行），`r` 键切换。加载时容忍两种文件形状：纯消息列表或带 `messages` 键的 dict（164-169 行）——v1 旧轨迹也能看。
 
-## 六、轨迹的三重身份
+## 七、轨迹的三重身份
 
 把本章串起来，traj.json 在项目里扮演三个角色：
 
@@ -107,7 +126,7 @@ for message in messages:
 
 一个格式服务三种用途，靠的是"不加工"这个纪律。
 
-## 七、小结
+## 八、小结
 
 - 轨迹三键：info（成本/配置/版本/死因/产出）、messages（全量含 extra）、trajectory_format 标记。
 - save 在 run 的 finally 里每步执行：崩溃有现场、可实时围观、None 路径纯返回。

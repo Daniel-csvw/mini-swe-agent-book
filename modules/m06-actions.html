@@ -170,12 +170,13 @@ document.documentElement.dataset.theme=t;})();</script>
 <h3>4.3 为什么允许许多个</h3>
 <p><code>mini.yaml:38</code> 要求 "AT LEAST ONE bash tool call"，swebench 配置更开了 <code>parallel_tool_calls: true</code>（<code>swebench.yaml:183</code>）并在提示词里鼓励独立命令并行发（<code>swebench.yaml:55</code>）。agent 侧逐条顺序执行（<code>default.py:156</code>）——<strong>"并行"是模型一次多说几条，不是真的并发执行</strong>。顺序执行保证了输出的确定性与哨兵检查的简单性。</p>
 <h2>五、路线二：textbased（任何模型都能跑）</h2>
-<h3>5.1 子类只改三处（litellm_textbased_model.py，48 行）</h3>
+<h3>5.1 子类只改四处（litellm_textbased_model.py，48 行）</h3>
 <p><code>LitellmTextbasedModel</code> 继承 <code>LitellmModel</code>，差异屈指可数：</p>
 <ol>
-<li>配置加 <code>action_regex</code>，默认 <code>r"```mswea_bash_command\s*\n(.*?)\n```"</code>（8 行）；</li>
+<li>配置加 <code>action_regex</code>，默认 <code>r"```mswea_bash_command\s*\n(.*?)\n```"</code>（8 行），并覆写 <code>format_error_template</code> 为"恰好一个"版（10-13 行）；</li>
 <li><code>_query</code> 不传 tools（20-27 行）；</li>
-<li><code>_parse_actions</code> 换用正则解析（29-37 行）；观察格式化换成 user 消息版（39-48 行）。</li>
+<li><code>_parse_actions</code> 换用正则解析（29-37 行）；</li>
+<li><code>format_observation_messages</code> 换成 user 消息版（39-48 行）。</li>
 </ol>
 <p>重试、计费、缓存标记、FormatError 契约全部继承——<strong>这就是"每个类都简单，多态提供选择"的实证</strong>。</p>
 <h3>5.2 恰好一个（actions_text.py:15-40）</h3>
@@ -196,7 +197,7 @@ document.documentElement.dataset.theme=t;})();</script>
 <li><strong>历史扁平化</strong>：<code>_prepare_messages_for_api</code> 把轨迹里的 response 对象拆成 output 项再发（<code>litellm_response_model.py:29-38</code>）——无状态端点，每次全量重放；</li>
 <li><strong>finish_reason 映射</strong>：Responses API 用 <code>status="incomplete"</code> + <code>incomplete_details.reason="max_output_tokens"</code> 表示截断，<code>finish_reason_from_responses_api</code>（45-55 行）把它映射成 <code>"length"</code>，让 m04 那份格式错误模板无需改动照常工作。</li>
 </ol>
-<p>解析校验逻辑与 toolcall 版同构（58-104 行），观察消息是 <code>type="function_call_output"</code> + <code>call_id</code>（132-135 行）。<code>LitellmResponseModel.query</code>（52-78 行）完整继承了重试与 FormatError 契约，只多了 dict/pydantic 双兼容的序列化兜底（62-71 行注释）。</p>
+<p>解析校验逻辑与 toolcall 版同构（58-104 行），观察消息是 <code>type="function_call_output"</code> + <code>call_id</code>（132-135 行）。注意 <code>LitellmResponseModel.query</code>（52-78 行）是<strong>整体覆写重实现</strong>而非继承父类方法——但重试节奏与 FormatError 契约原样保留，只多了 dict/pydantic 双兼容的序列化兜底（62-71 行注释）。</p>
 <h2>七、观察格式化：未执行的动作也要有交代</h2>
 <p>三条路线的格式化器共享一个关键设计，以 toolcall 版为例（<code>actions_toolcall.py:88-89</code>）：</p>
 <div class="codehilite"><pre><span></span><code><span class="n">not_executed</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"output"</span><span class="p">:</span> <span class="s2">""</span><span class="p">,</span> <span class="s2">"returncode"</span><span class="p">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="s2">"exception_info"</span><span class="p">:</span> <span class="s2">"action was not executed"</span><span class="p">}</span>

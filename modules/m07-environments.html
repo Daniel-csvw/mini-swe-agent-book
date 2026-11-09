@@ -154,8 +154,8 @@ document.documentElement.dataset.theme=t;})();</script>
                      <span class="s2">"extra"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"exit_status"</span><span class="p">:</span> <span class="s2">"Submitted"</span><span class="p">,</span> <span class="s2">"submission"</span><span class="p">:</span> <span class="n">submission</span><span class="p">}})</span>  <span class="c1"># :50-56</span>
 </code></pre></div>
 
-<p>判定条件三个，缺一不可：<strong>首行</strong>精确等于魔法字符串（前导空白容忍）、返回码为 0、其余行作为 submission。所以提示词反复强调 "Do not combine it with any other command"（<code>mini.yaml:18-19</code>）——<code>echo 哨兵 &amp;&amp; ls</code> 会让首行不再是哨兵；<code>false; echo 哨兵</code> 会让返回码非零。</p>
-<p><strong>为什么检查在环境侧？</strong> 因为"命令输出"只有环境拿得到第一手；agent 看到的已是格式化后的观察。把宝鉴定放在产地，agent 保持纯粹。这也是 m12 里自定义环境必须复制的一段逻辑（Docker 版 140-151 行逐字相同——项目容忍这两份重复，换取每个类的独立可读）。</p>
+<p>判定条件两个，缺一不可：<strong>首行</strong>精确等于魔法字符串（前导空白容忍）、返回码为 0；其余行则作为 submission 带走。所以提示词反复强调 "Do not combine it with any other command"（<code>mini.yaml:18-19</code>）——<code>echo 哨兵 &amp;&amp; ls</code> 会让首行不再是哨兵；<code>false; echo 哨兵</code> 会让返回码非零。</p>
+<p><strong>为什么检查在环境侧？</strong> 因为"命令输出"只有环境拿得到第一手；agent 看到的已是格式化后的观察。在产地完成鉴定，agent 保持纯粹。这也是 m12 里自定义环境必须复制的一段逻辑（Docker 版 140-151 行逐字相同——项目容忍这两份重复，换取每个类的独立可读）。</p>
 <h2>五、DockerEnvironment：容器生命周期</h2>
 <h3>5.1 配置面（15-42 行）</h3>
 <div class="table-wrap"><table>
@@ -225,7 +225,7 @@ document.documentElement.dataset.theme=t;})();</script>
 <span class="n">cmd</span><span class="o">.</span><span class="n">extend</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">container_id</span><span class="p">,</span> <span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">interpreter</span><span class="p">,</span> <span class="n">command</span><span class="p">])</span>  <span class="c1"># :113</span>
 </code></pre></div>
 
-<p>对照本地版：<code>Popen(command, shell=True)</code> 变成 <code>subprocess.run([docker, exec, ..., bash, -lc, command])</code>。<strong>执行语义完全一致</strong>（独立子壳、合并 stderr、超时包成 returncode -1），这就是"换环境不换 agent"的实证。116-124 行用 <code>subprocess.run</code> 而非 <code>_run</code>——容器内超时由 docker 自己收拾进程，宿主无需 killpg。</p>
+<p>对照本地版：<code>Popen(command, shell=True)</code> 变成 <code>subprocess.run([docker, exec, ..., bash, -lc, command])</code>。<strong>执行语义基本一致</strong>（独立子壳、合并 stderr、超时包成 returncode -1），这就是"换环境不换 agent"的实证。一个真实差异在超时清理：116-124 行用 <code>subprocess.run</code> 而非 <code>_run</code>，超时杀掉的只是宿主侧的 <code>docker exec</code> 客户端，<strong>容器内已启动的进程不保证随之终止</strong>——本地版的 killpg 清理保证在这里没有等价物。</p>
 <h3>5.3 销毁：异步兜底（153-161 行）</h3>
 <div class="codehilite"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">cleanup</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
     <span class="k">if</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">"container_id"</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>   <span class="c1"># :155  init 早期失败时属性可能不存在</span>
@@ -236,7 +236,7 @@ document.documentElement.dataset.theme=t;})();</script>
     <span class="bp">self</span><span class="o">.</span><span class="n">cleanup</span><span class="p">()</span>                                        <span class="c1"># :159-161</span>
 </code></pre></div>
 
-<p><code>stop</code> 给 60 秒宽限，不停就 <code>rm -f</code> 强删；整个命令后台执行，不阻塞退出。<code>__del__</code> 挂钩保证对象回收时容器不会泄漏。加上 <code>--rm</code> 与 <code>sleep 2h</code>，容器有三重死法：正常清理、超时自杀、退出随删——评测集群里不会堆积僵尸容器。</p>
+<p><code>timeout 60</code> 兜底整个 <code>stop</code> 命令——60 秒还没停掉就 <code>rm -f</code> 强删（注意 <code>docker stop</code> 自身的默认宽限是 10 秒，60 秒不是给容器的宽限期）；整个命令后台执行，不阻塞退出。<code>__del__</code> 挂钩保证对象回收时容器不会泄漏。加上 <code>--rm</code> 与 <code>sleep 2h</code>，容器有三重死法：正常清理、超时自杀、退出随删——评测集群里不会堆积僵尸容器。</p>
 <h2>六、其余环境：同一协议的变奏</h2>
 <ul>
 <li><strong>Singularity</strong>（<code>singularity.py</code>）：没有 daemon，先把镜像 build 成 sandbox 目录（46-65 行），失败重试 3 次（<code>sandbox_build_retries</code>，29-30 行），之后 <code>singularity exec</code> 进目录执行。默认 <code>--contain --cleanenv --fakeroot</code>（33 行）做隔离。HPC 集群的普通用户用不了 Docker，这是为他们准备的。</li>

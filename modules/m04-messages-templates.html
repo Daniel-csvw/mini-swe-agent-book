@@ -33,7 +33,7 @@ document.documentElement.dataset.theme=t;})();</script>
   <div class="topbar"><button class="theme-toggle" onclick="toggleTheme()">切换明暗</button></div>
   <div class="content">
 <h1>消息与模板 —— 一切皆 dict，渲染靠 Jinja</h1>
-<p class="meta">约 20 分钟读完</p><blockquote>
+<p class="meta">约 21 分钟读完</p><blockquote>
 <p>本章源文件：<code>src/minisweagent/agents/default.py:52-72</code>、<code>src/minisweagent/utils/serialize.py</code>、<code>src/minisweagent/config/mini.yaml</code>、<code>src/minisweagent/config/default.yaml</code>。</p>
 </blockquote>
 <h2>一、引子：模型看到的第一个字是怎么来的</h2>
@@ -220,14 +220,14 @@ messages 列表（线性历史，只增不减）           default.py:42
 <div class="codehilite"><pre><span></span><code><span class="k">return</span> <span class="n">Template</span><span class="p">(</span><span class="n">template</span><span class="p">,</span> <span class="n">undefined</span><span class="o">=</span><span class="n">StrictUndefined</span><span class="p">)</span><span class="o">.</span><span class="n">render</span><span class="p">(</span><span class="o">**</span><span class="bp">self</span><span class="o">.</span><span class="n">get_template_vars</span><span class="p">())</span>
 </code></pre></div>
 
-<p>Jinja 默认对未定义变量渲染成空字符串；<code>StrictUndefined</code> 则直接抛 <code>UndefinedError</code>。这是刻选择：<strong>提示词里悄悄少一块比响亮地报错危险得多</strong>。观察模板、错误模板同样全部用 StrictUndefined（<code>actions_toolcall.py:44/69/92</code>、<code>actions_text.py:30/53</code>）。</p>
+<p>Jinja 默认对未定义变量渲染成空字符串；<code>StrictUndefined</code> 则直接抛 <code>UndefinedError</code>。这是刻意选择：<strong>提示词里悄悄少一块比响亮地报错危险得多</strong>。观察模板、错误模板同样全部用 StrictUndefined（<code>actions_toolcall.py:44/69/92</code>、<code>actions_text.py:30/53</code>）。</p>
 <h2>六、两份内置模板：toolcall 与 textbased 的对照</h2>
-<p>配置目录里 <code>mini.yaml</code>（CLI 默认，toolcall 路线）与 <code>default.yaml</code>（hello_world 默认，textbased 路线）是同一份提示词的两种方言。</p>
+<p>配置目录里 <code>mini.yaml</code>（CLI 默认，toolcall 路线）与 <code>default.yaml</code>（textbased 风格）是同一份提示词的两种方言。一个容易误会的点：<code>default.yaml</code> 是 <code>hello_world.py:35</code> 借用的 agent 模板，但 hello_world 的模型类其实是 LitellmModel（toolcall 路线，<code>hello_world.py:33</code>）——<strong>模板风格与模型路线并不强绑定</strong>；真正配 textbased 模型类的 CLI 配置另有 <code>mini_textbased.yaml</code>。</p>
 <h3>6.1 system_template：一句话 vs 一段格式法</h3>
 <p><code>mini.yaml:2-3</code> 的 system 只有一句 "You are a helpful assistant that can interact with a computer."——格式约束交给原生 tool call schema 强制。</p>
 <p><code>default.yaml:2-17</code> 的 system 则长篇规定格式：必须恰好一个 <code>```mswea_bash_command</code> 代码块、前面要有 THOUGHT 段、附带格式示例——因为 textbased 路线没有 API 层面的约束，只能靠提示词恳求模型守规矩。<strong>约束放在哪一层，是两条路线最本质的区别</strong>（m06 展开）。</p>
 <h3>6.2 instance_template：同构的五段式</h3>
-<p>两份的任务模板结构一致（<code>mini.yaml:4-100</code>）：</p>
+<p><code>mini.yaml:4-100</code> 的任务模板是五段式（<code>default.yaml</code> 大致同构，但多出一节 "Formatting your response" 的完整示例，<code>default.yaml:46-56</code>——textbased 风格需要更多格式示范）：</p>
 <ol>
 <li><code>Please solve this issue: {{task}}</code> —— 任务注入点；</li>
 <li>Recommended Workflow：读代码 → 写复现脚本 → 改源码 → 再跑脚本 → 测边界 → 提交（六步）；</li>
@@ -246,13 +246,14 @@ messages 列表（线性历史，只增不减）           default.py:42
 <p><strong>头尾保留、中间挖掉</strong>是刻意的：命令输出的关键信息（报错、总结）通常在两端。配合 extra 里的 <code>raw_output</code> 全量留存，模型看精简版、人看完整版，两不耽误。</p>
 <h3>6.4 format_error_template：区分"真错误"与"被截断"</h3>
 <p><code>mini.yaml:129-149</code> 有个精妙的分支（130 行）：</p>
-<div class="codehilite"><pre><span></span><code>{% if finish_reason == "length" or (finish_reason == "tool_calls" and not has_tool_calls) %}
+<div class="codehilite"><pre><span></span><code>{% if finish_reason is defined and (finish_reason == "length" or (finish_reason == "tool_calls" and not has_tool_calls)) %}
     → "你的输出被 token 上限截断了，说简短点，以一个 bash tool call 结尾"
 {% else %}
     → 通用格式纠错 + 正确调用示例
 {% endif %}
 </code></pre></div>
 
+<p><code>finish_reason is defined</code> 守卫不可省：StrictUndefined 下，不传 <code>finish_reason</code> 的调用方会让无守卫的模板直接抛 <code>UndefinedError</code>；有了守卫，未传时短路进 else 分支。</p>
 <p>模型没产出工具调用，<strong>不一定是格式错误，也可能是话太长被截了</strong>（<code>finish_reason="length"</code>）。两种情况的纠正策略完全不同：前者要教格式，后者要教模型长话短说。模板变量 <code>finish_reason</code> 由解析器传入（<code>actions_toolcall.py:31-37</code> 的 <code>template_kwargs</code>），Responses API 路线还专门做了状态映射（<code>actions_toolcall_response.py:45-55</code>）。</p>
 <h2>七、小结</h2>
 <ul>

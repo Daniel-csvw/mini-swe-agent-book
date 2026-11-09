@@ -33,7 +33,7 @@ document.documentElement.dataset.theme=t;})();</script>
   <div class="topbar"><button class="theme-toggle" onclick="toggleTheme()">切换明暗</button></div>
   <div class="content">
 <h1>扩展指南 —— 写你自己的 Model/Environment/Agent</h1>
-<p class="meta">约 15 分钟读完</p><blockquote>
+<p class="meta">约 16 分钟读完</p><blockquote>
 <p>本章源文件：<code>src/minisweagent/__init__.py:43-80</code>、<code>models/test_models.py</code>、<code>models/extra/roulette.py</code>、<code>run/hello_world.py</code>、<code>docs/advanced/cookbook.md</code>。</p>
 </blockquote>
 <h2>一、引子：不改源码，能走多远</h2>
@@ -184,12 +184,12 @@ document.documentElement.dataset.theme=t;})();</script>
 <li><code>RouletteModel</code>（15-43 行）：配置里给一组 <code>model_kwargs</code>，每次 query 随机挑一个转发（25-33 行），响应上贴 <code>model_name</code> 标签；</li>
 <li><code>InterleavingModel</code>（54 行起）：按 <code>sequence</code> 交替，比如 <code>[0,0,1]</code> 表示 A 两次 B 一次循环。</li>
 </ul>
-<p>因为它们自己也是合法 Model（协议方法全），可以无缝塞进任何 agent。想做"便宜模型探路、贵模型收尾"的混合策略，这就是模板。</p>
+<p>注意它们<strong>并不是完整的 Model</strong>：只实现了 <code>query</code>/<code>get_template_vars</code>/<code>serialize</code>，缺 <code>format_message</code> 与 <code>format_observation_messages</code>（协议要求见 <code>__init__.py:50-54</code>）——直接塞进 DefaultAgent 会在 run 开场渲染系统消息时 AttributeError。这个示例展示的是"Model 包 Model"的组合思路；想做"便宜模型探路、贵模型收尾"的混合策略，以它为模板、把两个格式化方法也转发给被选中的模型，才是能上线的完整版。</p>
 <h2>七、接线：让 CLI 用上你的组件</h2>
 <p>三条路，按侵入性排序：</p>
 <ol>
 <li><strong>全路径类名</strong>：<code>mini --model-class mypkg.mymodel.MyModel --environment-class mypkg.myenv.MyEnv</code>——工厂查不到短名就当 import 路径（m09），你的包只要在 Python 路径上即可；</li>
-<li><strong>自己的 run 脚本</strong>：照 <code>hello_world.py</code>（42 行）组装三组件，<code>typer</code> 加 CLI。项目哲学"每个用例从一个 run 脚本开始"（<code>AGENTS.md</code>）；<code>MSWEA_DEFAULT_RUN</code> 环境变量可把默认入口换成你的脚本（<code>cookbook.md:28</code>）；</li>
+<li><strong>自己的 run 脚本</strong>：照 <code>hello_world.py</code>（42 行）组装三组件，<code>typer</code> 加 CLI。项目哲学"每个用例从一个 run 脚本开始"（<code>AGENTS.md</code>）。注意 <code>cookbook.md:28</code> 提到的 <code>MSWEA_DEFAULT_RUN</code> 环境变量在 v2.4.6 源码里<strong>并无实现</strong>（<code>mini</code> 入口硬编码为 <code>run.mini:app</code>，<code>pyproject.toml:90</code>）——文档超前于代码，别依赖它；</li>
 <li><strong>YAML 里写全路径</strong>：<code>model_class: mypkg.mymodel.MyModel</code> 放进配置，效果同 1。</li>
 </ol>
 <h2>八、检查清单与全书收尾</h2>

@@ -33,7 +33,7 @@ document.documentElement.dataset.theme=t;})();</script>
   <div class="topbar"><button class="theme-toggle" onclick="toggleTheme()">切换明暗</button></div>
   <div class="content">
 <h1>轨迹持久化 —— traj.json 与 inspector</h1>
-<p class="meta">约 13 分钟读完</p><blockquote>
+<p class="meta">约 15 分钟读完</p><blockquote>
 <p>本章源文件：<code>src/minisweagent/agents/default.py:159-190</code>、<code>run/utilities/inspector.py</code>（316 行）、<code>models/utils/content_string.py</code>（87 行）。</p>
 </blockquote>
 <h2>一、引子：跑完留下的那个文件</h2>
@@ -74,7 +74,23 @@ document.documentElement.dataset.theme=t;})();</script>
 </tr>
 </tbody>
 </table></div>
-<h2>三、serialize：轨迹的解剖（default.py:159-180）</h2>
+<h2>三、全景：从内存到磁盘再到眼睛</h2>
+<div class="codehilite"><pre><span></span><code>DefaultAgent.run 循环                         default.py:88-124
+   │  每步 finally
+   ▼
+agent.save(output_path)                       default.py:120-121 → 182-190
+   │  serialize()：info + messages + format   :159-180
+   │  再合并 model.serialize()、env.serialize()、调用方 extra
+   ▼
+*.traj.json（每步全量重写）
+   │
+   ├─→ mini-extra inspect：textual 翻页回放    inspector.py:296-312
+   ├─→ m11 批量评测：取 submission 写 preds.json
+   └─→ 微调/RL：线性历史直接当训练数据
+</code></pre></div>
+
+<p>一条"不加工"的管道：内存里的 messages 原样落盘，下游三个消费者各取所需。下面按管道顺序精读。</p>
+<h2>四、serialize：轨迹的解剖（default.py:159-180）</h2>
 <div class="codehilite"><pre><span></span><code><span class="n">agent_data</span> <span class="o">=</span> <span class="p">{</span>
     <span class="s2">"info"</span><span class="p">:</span> <span class="p">{</span>
         <span class="s2">"model_stats"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"instance_cost"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">cost</span><span class="p">,</span> <span class="s2">"api_calls"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_calls</span><span class="p">},</span>   <span class="c1"># :165-168</span>
@@ -97,7 +113,7 @@ document.documentElement.dataset.theme=t;})();</script>
 <li>180 行的合并顺序：agent 基底 → 模型元数据 → 环境元数据 → 调用方 extra。m11 的批量跑就是靠最后的 <code>*extra_dicts</code> 塞进 <code>instance_id</code> 和覆写 exit_status；</li>
 <li><code>messages</code> <strong>原样</strong>落盘，含全部 extra（原始响应、未截断输出、成本、时间戳）——m04 的"两个视图"在这里闭合。</li>
 </ul>
-<h2>四、save：每步都落盘（182-190 行）</h2>
+<h2>五、save：每步都落盘（182-190 行）</h2>
 <div class="codehilite"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">save</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">path</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span> <span class="o">*</span><span class="n">extra_dicts</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
     <span class="n">data</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">serialize</span><span class="p">(</span><span class="o">*</span><span class="n">extra_dicts</span><span class="p">)</span>
     <span class="k">if</span> <span class="n">path</span><span class="p">:</span>
@@ -113,9 +129,9 @@ document.documentElement.dataset.theme=t;})();</script>
 <li><strong>path=None 也工作</strong>：<code>save(None)</code> 只返回 dict 不写盘——Python bindings 里拿结构化结果用。</li>
 </ol>
 <p>代价是每步全量重写 JSON。对几百步的轨迹这是几十毫秒级开销，相比模型调用的秒级延迟可忽略——又是"简单优先"的取舍。</p>
-<h2>五、inspector：终端里的轨迹浏览器</h2>
+<h2>六、inspector：终端里的轨迹浏览器</h2>
 <p><code>mini-extra inspect [path]</code>（<code>inspector.py:296-312</code>）：path 是文件就直接看，是目录就 <code>rglob("*.traj.json")</code> 收集全部轨迹排序看（305 行）。textual App，vim 风格键位。</p>
-<h3>5.1 消息怎么切成"步"（_messages_to_steps，25-38 行）</h3>
+<h3>6.1 消息怎么切成"步"（_messages_to_steps，25-38 行）</h3>
 <div class="codehilite"><pre><span></span><code><span class="k">for</span> <span class="n">message</span> <span class="ow">in</span> <span class="n">messages</span><span class="p">:</span>
     <span class="k">if</span> <span class="n">message</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"extra"</span><span class="p">,</span> <span class="p">{})</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"actions"</span><span class="p">)</span> <span class="ow">or</span> <span class="n">message</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"role"</span><span class="p">)</span> <span class="o">==</span> <span class="s2">"assistant"</span><span class="p">:</span>  <span class="c1"># :31</span>
         <span class="n">steps</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">current_step</span><span class="p">)</span>
@@ -125,7 +141,7 @@ document.documentElement.dataset.theme=t;})();</script>
 </code></pre></div>
 
 <p>遇到助手消息（或带 actions 的消息——human 模式的用户命令）就开新页，其余消息（观察、纠错、插话）归入当前页。<strong>一页 = 模型的一次决策 + 其全部后果</strong>，正好是回顾时的自然单位。开头的 system/user 两条消息自成第 0 页。</p>
-<h3>5.2 键位表（81-95 行）</h3>
+<h3>6.2 键位表（81-95 行）</h3>
 <div class="table-wrap"><table>
 <thead>
 <tr>
@@ -169,9 +185,9 @@ document.documentElement.dataset.theme=t;})();</script>
 </tbody>
 </table></div>
 <p>索引设置器自动夹取边界并回滚顶部（121-127、139-146 行）——翻到头不会炸。<code>e</code> 键把当前步 dump 成临时 JSON 调 <code>jless</code>（255-272 行），看 extra 里的原始响应最方便。</p>
-<h3>5.3 渲染：复用 get_content_string（195-225 行）</h3>
+<h3>6.3 渲染：复用 get_content_string（195-225 行）</h3>
 <p>每条消息的展示文本来自 <code>get_content_string</code>（m08 提过，<code>content_string.py:32-87</code>）：字符串 content、多模态块、tool_use/tool_result、OpenAI tool_calls、Responses output 都能提取；观察 JSON 还会被美化成键值分段（<code>_format_observation</code>，17-29 行）。assistant 的 <code>reasoning_content</code> 单独分块展示（213-219 行），<code>r</code> 键切换。加载时容忍两种文件形状：纯消息列表或带 <code>messages</code> 键的 dict（164-169 行）——v1 旧轨迹也能看。</p>
-<h2>六、轨迹的三重身份</h2>
+<h2>七、轨迹的三重身份</h2>
 <p>把本章串起来，traj.json 在项目里扮演三个角色：</p>
 <ol>
 <li><strong>调试现场</strong>：崩溃有 traceback、格式错误有原始响应（m05 契约）、每步落盘可围观；</li>
@@ -179,7 +195,7 @@ document.documentElement.dataset.theme=t;})();</script>
 <li><strong>训练数据</strong>：线性历史 + 原生消息格式，意味着轨迹可直接用于微调/RL——README 把这列为设计目标（<code>README.md:45-47</code>、<code>:91</code>）。</li>
 </ol>
 <p>一个格式服务三种用途，靠的是"不加工"这个纪律。</p>
-<h2>七、小结</h2>
+<h2>八、小结</h2>
 <ul>
 <li>轨迹三键：info（成本/配置/版本/死因/产出）、messages（全量含 extra）、trajectory_format 标记。</li>
 <li>save 在 run 的 finally 里每步执行：崩溃有现场、可实时围观、None 路径纯返回。</li>

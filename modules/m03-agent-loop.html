@@ -161,6 +161,7 @@ document.documentElement.dataset.theme=t;})();</script>
 <h3>4.2 实例状态（39-50 行）</h3>
 <p><code>__init__</code> 收下 model 与 env 两个组件，然后初始化六个可变状态：</p>
 <div class="codehilite"><pre><span></span><code><span class="bp">self</span><span class="o">.</span><span class="n">messages</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>            <span class="c1"># :42  线性历史，只增不减</span>
+<span class="bp">self</span><span class="o">.</span><span class="n">extra_template_vars</span> <span class="o">=</span> <span class="p">{}</span>             <span class="c1"># :45  模板变量的额外来源（run 时注入 task）</span>
 <span class="bp">self</span><span class="o">.</span><span class="n">cost</span> <span class="o">=</span> <span class="mf">0.0</span>                           <span class="c1"># :47  本实例累计成本</span>
 <span class="bp">self</span><span class="o">.</span><span class="n">n_calls</span> <span class="o">=</span> <span class="mi">0</span>                          <span class="c1"># :48  模型调用次数</span>
 <span class="bp">self</span><span class="o">.</span><span class="n">n_consecutive_format_errors</span> <span class="o">=</span> <span class="mi">0</span>      <span class="c1"># :49  连续格式错误计数</span>
@@ -242,7 +243,7 @@ document.documentElement.dataset.theme=t;})();</script>
 </code></pre></div>
 
 <ul>
-<li><strong>102 行的注释揭示了一个契约</strong>：模型类在解析失败时，必须把已产生的成本塞进 FormatError 的消息里（<code>litellm_model.py:87-98</code> 履行它），因为正常路径上 <code>query()</code> 的 150 行计费没机会执行。钱花了就得记账，哪怕输出是废的。</li>
+<li><strong>101 行的注释揭示了一个契约</strong>：模型类在解析失败时，必须把已产生的成本塞进 FormatError 的消息里（<code>litellm_model.py:87-98</code> 履行它），因为正常路径上 <code>query()</code> 的 150 行计费没机会执行。钱花了就得记账，哪怕输出是废的。</li>
 <li>连续计数在<strong>任何干净 step 后清零</strong>（99 行）——惩罚的是"屡教不改"，不是"偶尔犯错"。</li>
 <li>达到上限时追加 <code>RepeatedFormatError</code> 的 exit 消息；没达到就只追加纠错消息（role=user），下一轮模型会读到纠错指引（模板见 m04）。</li>
 </ul>
@@ -352,7 +353,7 @@ document.documentElement.dataset.theme=t;})();</script>
 <li>FormatError 必须携带成本（模型侧契约），连续 3 次才判死刑；每步 finally 落盘，崩溃也有完整轨迹。</li>
 <li>下一章看消息本身：模板变量从哪里来，<code>extra</code> 里装了什么。</li>
 </ul>
-<div class="pager"><a href="m02-package-map.html"><span class="dir">← 上一章</span>包地图 —— 五个目录，三个协议</a><a class="next" href="m04-messages-templates.html"><span class="dir">下一章 →</span>消息与模板 —— 一切皆 dict，渲染靠 Jinja</a></div>
+<div class="pager"><a href="m02-package-map.html"><span class="dir">← 上一章</span>包地图 —— 五个核心目录，三个协议</a><a class="next" href="m04-messages-templates.html"><span class="dir">下一章 →</span>消息与模板 —— 一切皆 dict，渲染靠 Jinja</a></div>
   </div>
 </div>
 </div>

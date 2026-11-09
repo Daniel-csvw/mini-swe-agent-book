@@ -106,14 +106,14 @@ model = DeterministicModel(outputs=[
 - `RouletteModel`（15-43 行）：配置里给一组 `model_kwargs`，每次 query 随机挑一个转发（25-33 行），响应上贴 `model_name` 标签；
 - `InterleavingModel`（54 行起）：按 `sequence` 交替，比如 `[0,0,1]` 表示 A 两次 B 一次循环。
 
-因为它们自己也是合法 Model（协议方法全），可以无缝塞进任何 agent。想做"便宜模型探路、贵模型收尾"的混合策略，这就是模板。
+注意它们**并不是完整的 Model**：只实现了 `query`/`get_template_vars`/`serialize`，缺 `format_message` 与 `format_observation_messages`（协议要求见 `__init__.py:50-54`）——直接塞进 DefaultAgent 会在 run 开场渲染系统消息时 AttributeError。这个示例展示的是"Model 包 Model"的组合思路；想做"便宜模型探路、贵模型收尾"的混合策略，以它为模板、把两个格式化方法也转发给被选中的模型，才是能上线的完整版。
 
 ## 七、接线：让 CLI 用上你的组件
 
 三条路，按侵入性排序：
 
 1. **全路径类名**：`mini --model-class mypkg.mymodel.MyModel --environment-class mypkg.myenv.MyEnv`——工厂查不到短名就当 import 路径（m09），你的包只要在 Python 路径上即可；
-2. **自己的 run 脚本**：照 `hello_world.py`（42 行）组装三组件，`typer` 加 CLI。项目哲学"每个用例从一个 run 脚本开始"（`AGENTS.md`）；`MSWEA_DEFAULT_RUN` 环境变量可把默认入口换成你的脚本（`cookbook.md:28`）；
+2. **自己的 run 脚本**：照 `hello_world.py`（42 行）组装三组件，`typer` 加 CLI。项目哲学"每个用例从一个 run 脚本开始"（`AGENTS.md`）。注意 `cookbook.md:28` 提到的 `MSWEA_DEFAULT_RUN` 环境变量在 v2.4.6 源码里**并无实现**（`mini` 入口硬编码为 `run.mini:app`，`pyproject.toml:90`）——文档超前于代码，别依赖它；
 3. **YAML 里写全路径**：`model_class: mypkg.mymodel.MyModel` 放进配置，效果同 1。
 
 ## 八、检查清单与全书收尾

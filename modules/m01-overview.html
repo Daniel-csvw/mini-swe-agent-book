@@ -34,7 +34,7 @@ document.documentElement.dataset.theme=t;})();</script>
   <div class="content">
 <h1>概览 —— 一百行代码，74% 的 SWE-bench</h1>
 <p class="meta">约 15 分钟读完</p><blockquote>
-<p>本书基于 mini-swe-agent <strong>v2.4.6</strong>（<code>src/minisweagent/__init__.py:11</code>）。所有源码引用均为仓库根目录相对路径加行号，可直接跳转核对。</p>
+<p>本章事实来源：<code>README.md</code>、<code>docs/advanced/v2_migration.md</code> 与整个 <code>src/minisweagent</code> 包。本书基于 <strong>v2.4.6</strong>（<code>src/minisweagent/__init__.py:11</code>），所有引用为仓库根目录相对路径加行号，可直接跳转核对。</p>
 </blockquote>
 <h2>一、引子：同一个团队，两次答案</h2>
 <p>2024 年，普林斯顿与斯坦福的团队做了 SWE-bench 和 SWE-agent，点燃了 coding agent 这把火。一年之后，他们问了自己一个问题（<code>README.md:21</code>）：</p>
@@ -141,7 +141,7 @@ document.documentElement.dataset.theme=t;})();</script>
 </tbody>
 </table></div>
 <p>README 说 agent 类"约 100 行"（<code>README.md:26</code>），指的是刨去配置类、序列化方法之后的有效逻辑。整个核心链路——入口、循环、模型、环境——加起来不到七百行，且<strong>没有任何重型框架依赖</strong>：没有 LangChain，没有工作流引擎，只有 litellm、pydantic、jinja2 这类单一职责的工具库（<code>pyproject.toml:33-48</code>）。</p>
-<p>项目结构五个目录，各管一件事：</p>
+<p>项目结构五个核心目录，各管一件事（<code>utils/</code> 是公共辅助，不算主格）：</p>
 <div class="codehilite"><pre><span></span><code>src/minisweagent/
 ├── __init__.py      # 三个协议（Model / Environment / Agent）+ 全局配置加载
 ├── agents/          # 控制流：循环怎么转
@@ -152,7 +152,7 @@ document.documentElement.dataset.theme=t;})();</script>
 └── utils/           # 日志、递归合并等小工具
 </code></pre></div>
 
-<p>记住这个五分法，后面每一章都落在其中一格上。</p>
+<p>记住这五个核心目录，后面每一章都落在其中一格上。</p>
 <h2>四、三根设计支柱</h2>
 <p>README 的动机部分（<code>README.md:38-54</code>）把设计哲学说得很直白，归纳为三根支柱。</p>
 <h3>4.1 支柱一：除了 bash，没有别的工具</h3>
@@ -192,8 +192,8 @@ document.documentElement.dataset.theme=t;})();</script>
 <tbody>
 <tr>
 <td>动作传递</td>
-<td>正则解析 <code>```mswea_bash_command</code> 代码块</td>
-<td>原生 tool call 为默认，textbased 保留为备选</td>
+<td>正则解析 <code>```bash</code> 代码块（<code>v2_migration.md:48</code>）</td>
+<td>原生 tool call 为默认，textbased 保留为备选（正则改用 <code>```mswea_bash_command</code>）</td>
 </tr>
 <tr>
 <td>动作解析职责</td>
@@ -242,7 +242,7 @@ document.documentElement.dataset.theme=t;})();</script>
 <tr>
 <td>m02</td>
 <td>包地图</td>
-<td>五个目录、三个协议、依赖与入口</td>
+<td>五个核心目录、三个协议、依赖与入口</td>
 </tr>
 <tr>
 <td>m03</td>
@@ -304,7 +304,7 @@ document.documentElement.dataset.theme=t;})();</script>
 <li>v2 的关键演进：解析职责下沉到模型类、agent 纯协调化、协议代替继承。</li>
 <li>下一章先把包结构、三个协议和程序入口看清楚，再进循环。</li>
 </ul>
-<div class="pager"><a class="next" href="m02-package-map.html"><span class="dir">下一章 →</span>包地图 —— 五个目录，三个协议</a></div>
+<div class="pager"><a class="next" href="m02-package-map.html"><span class="dir">下一章 →</span>包地图 —— 五个核心目录，三个协议</a></div>
   </div>
 </div>
 </div>
