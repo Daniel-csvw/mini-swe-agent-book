@@ -152,8 +152,8 @@ recursive_merge(self.config.model_dump(), self.env.get_template_vars(),
 ```text
 run(task) → add_messages(system/instance 模板渲染) → loop:
             step() → model.query(messages)               # Model 五方法之一
-                   → format_observation_messages(...)   # 把执行结果包成观察消息
                    → env.execute(action)                # Environment 三方法之一
+                   → format_observation_messages(...)   # 把执行结果包成观察消息
                    → 检查哨兵 / 限额 / 格式错误
             finally: save(...) → model.serialize() + env.serialize()
 ```
