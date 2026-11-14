@@ -149,13 +149,13 @@ def __del__(self):
 
 - 环境实现可互换（本章五个实现同协议）；
 - 并发安全（无线程间共享 shell）；
-- 超时干净（进程组/容器边界即清理边界）；
+- 超时干净（本地版 killpg 杀整组；Docker 版残留进程由容器生命周期兜底，见 5.2）；
 - 轨迹可重放（每条命令自包含，不依赖前序 shell 状态）。
 
 ## 八、小结
 
 - execute 的契约：进 action dict，出 output dict；执行异常包成数据（returncode -1），只有 Submitted 穿透。
 - 本地版精髓在 `_run`：新会话 + killpg 杀整组 + 超时保留部分输出。
-- 哨兵三条件：首行精确匹配、返回码 0、余行即 submission；检查在环境侧，agent 无感。
+- 哨兵判定两个条件：首行精确匹配、返回码 0；通过后余行即 submission。检查在环境侧，agent 无感。
 - Docker 版 = sleep 长容器 + 逐条 exec + 三重销毁兜底；与本地版执行语义逐项对齐。
 - 下一章把用户请进循环：human/confirm/yolo 三模式与中断恢复。

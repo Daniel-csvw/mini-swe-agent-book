@@ -33,7 +33,7 @@ document.documentElement.dataset.theme=t;})();</script>
   <div class="topbar"><button class="theme-toggle" onclick="toggleTheme()">切换明暗</button></div>
   <div class="content">
 <h1>扩展指南 —— 写你自己的 Model/Environment/Agent</h1>
-<p class="meta">约 16 分钟读完</p><blockquote>
+<p class="meta">约 20 分钟读完</p><blockquote>
 <p>本章源文件：<code>src/minisweagent/__init__.py:43-80</code>、<code>models/test_models.py</code>、<code>models/extra/roulette.py</code>、<code>run/hello_world.py</code>、<code>docs/advanced/cookbook.md</code>。</p>
 </blockquote>
 <h2>一、引子：不改源码，能走多远</h2>
@@ -192,6 +192,23 @@ document.documentElement.dataset.theme=t;})();</script>
 <li><strong>自己的 run 脚本</strong>：照 <code>hello_world.py</code>（42 行）组装三组件，<code>typer</code> 加 CLI。项目哲学"每个用例从一个 run 脚本开始"（<code>AGENTS.md</code>）。注意 <code>cookbook.md:28</code> 提到的 <code>MSWEA_DEFAULT_RUN</code> 环境变量在 v2.4.6 源码里<strong>并无实现</strong>（<code>mini</code> 入口硬编码为 <code>run.mini:app</code>，<code>pyproject.toml:90</code>）——文档超前于代码，别依赖它；</li>
 <li><strong>YAML 里写全路径</strong>：<code>model_class: mypkg.mymodel.MyModel</code> 放进配置，效果同 1。</li>
 </ol>
+<h3>7.1 端到端：写一个自定义环境并跑通</h3>
+<p>把上面的零件连成一条线。新建 <code>myenv.py</code>（放在当前目录即可，Python 路径已包含它）：</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">minisweagent.environments.local</span><span class="w"> </span><span class="kn">import</span> <span class="n">LocalEnvironment</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyEnv</span><span class="p">(</span><span class="n">LocalEnvironment</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">execute</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">action</span><span class="p">:</span> <span class="nb">dict</span><span class="p">,</span> <span class="n">cwd</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">""</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">timeout</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">action</span><span class="p">[</span><span class="s2">"command"</span><span class="p">]</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">"hello "</span><span class="p">):</span>
+            <span class="k">return</span> <span class="p">{</span><span class="s2">"output"</span><span class="p">:</span> <span class="sa">f</span><span class="s2">"hi </span><span class="si">{</span><span class="n">action</span><span class="p">[</span><span class="s1">'command'</span><span class="p">][</span><span class="mi">6</span><span class="p">:]</span><span class="si">}</span><span class="s2">"</span><span class="p">,</span> <span class="s2">"returncode"</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span> <span class="s2">"exception_info"</span><span class="p">:</span> <span class="s2">""</span><span class="p">}</span>
+        <span class="k">return</span> <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">action</span><span class="p">,</span> <span class="n">cwd</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="n">timeout</span><span class="p">)</span>
+</code></pre></div>
+
+<p>然后照常用 CLI，只是把类名换成全路径：</p>
+<div class="codehilite"><pre><span></span><code>mini<span class="w"> </span>-c<span class="w"> </span>mini.yaml<span class="w"> </span>--environment-class<span class="w"> </span>myenv.MyEnv<span class="w"> </span>-t<span class="w"> </span><span class="s2">"先运行 hello world，再用 ls 看目录"</span>
+</code></pre></div>
+
+<p>这条命令背后发生了什么，前面各章都已拆过：<code>mini.py:73-92</code> 把 <code>environment_class</code> 合进配置 dict → <code>get_environment</code>（<code>environments/__init__.py:30-33</code>）弹出该键并 <code>importlib</code> 加载 <code>MyEnv</code> → 剩下的 <code>env</code>/<code>timeout</code> 等 YAML 键作为 kwargs 传给 <code>LocalEnvironment</code> 的配置类 → agent 照旧调 <code>env.execute</code>。<strong>继承 <code>LocalEnvironment</code> 让§4 的三个契约（哨兵、异常包成 returncode -1、serialize 形状）在走 <code>super()</code> 的命令上自动保留</strong>；只拦截一个前缀，其余照旧。跑完打开轨迹文件，<code>info.config.environment_type</code> 会是 <code>myenv.MyEnv</code>（m10 的自描述）——从写类到接线到落盘，整条链路闭合。</p>
+<p>想更进一步就换自定义 Model：把 <code>DeterministicModel</code>（§5）当模板补齐五个方法，再用 <code>--model-class</code> 指过去即可；检查清单在下一节。</p>
 <h2>八、检查清单与全书收尾</h2>
 <p>自定义组件上线前对照：</p>
 <ul>

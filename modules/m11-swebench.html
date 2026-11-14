@@ -80,7 +80,7 @@ document.documentElement.dataset.theme=t;})();</script>
 ├─ 输出目录 + 文件日志                    :217-220
 ├─ load_dataset(subset, split)           :222-226  （DATASET_MAPPING 53-62）
 ├─ filter_instances：正则过滤/切片/洗牌   :228 → :180-197
-├─ 跳过 preds.json 里已完成的 instance    :229-232  ← 断点续跑
+├─ 跳过 preds.json 里已有的一切（含失败）  :229-232  ← 断点续跑
 ├─ 配置合并（YAML + CLI 覆盖）            :235-241
 ├─ RunBatchProgressManager               :243
 └─ Live 进度界面 + ThreadPoolExecutor    :256-271
@@ -199,7 +199,7 @@ document.documentElement.dataset.theme=t;})();</script>
 </tr>
 </tbody>
 </table></div>
-<p>最后一条与 m07 的哨兵判定严丝合缝：<code>echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT &amp;&amp; cat patch.txt</code> 的首行是哨兵、余行是 patch、返回码 0——三条件全中，submission 就是 patch 文本。提示词还严禁提交测试文件/辅助脚本/二进制（84-92 行），这些都是评测有效性的护栏。</p>
+<p>最后一条与 m07 的哨兵判定严丝合缝：<code>echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT &amp;&amp; cat patch.txt</code> 的首行是哨兵、返回码 0——两个判定条件全中，余下的 patch 文本就成了 submission。提示词还严禁提交测试文件/辅助脚本/二进制（84-92 行），这些都是评测有效性的护栏。</p>
 <h2>八、swebench_single：调试单例的入口</h2>
 <p><code>swebench_single.py</code>（100 行）是批量版的单发变体：<code>-i</code> 给 instance_id 或排序后的索引（65-67 行），默认 interactive agent（94 行）——可以 confirm 模式围观模型解一个真实 issue，是理解评测行为的最佳实验场。环境构造复用 <code>get_sb_environment</code>（89 行），配置流水线与 mini.py 同构。</p>
 <h2>九、小结</h2>

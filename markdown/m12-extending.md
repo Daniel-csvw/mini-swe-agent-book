@@ -116,6 +116,30 @@ model = DeterministicModel(outputs=[
 2. **自己的 run 脚本**：照 `hello_world.py`（42 行）组装三组件，`typer` 加 CLI。项目哲学"每个用例从一个 run 脚本开始"（`AGENTS.md`）。注意 `cookbook.md:28` 提到的 `MSWEA_DEFAULT_RUN` 环境变量在 v2.4.6 源码里**并无实现**（`mini` 入口硬编码为 `run.mini:app`，`pyproject.toml:90`）——文档超前于代码，别依赖它；
 3. **YAML 里写全路径**：`model_class: mypkg.mymodel.MyModel` 放进配置，效果同 1。
 
+### 7.1 端到端：写一个自定义环境并跑通
+
+把上面的零件连成一条线。新建 `myenv.py`（放在当前目录即可，Python 路径已包含它）：
+
+```python
+from minisweagent.environments.local import LocalEnvironment
+
+class MyEnv(LocalEnvironment):
+    def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None) -> dict:
+        if action["command"].startswith("hello "):
+            return {"output": f"hi {action['command'][6:]}", "returncode": 0, "exception_info": ""}
+        return super().execute(action, cwd, timeout=timeout)
+```
+
+然后照常用 CLI，只是把类名换成全路径：
+
+```bash
+mini -c mini.yaml --environment-class myenv.MyEnv -t "先运行 hello world，再用 ls 看目录"
+```
+
+这条命令背后发生了什么，前面各章都已拆过：`mini.py:73-92` 把 `environment_class` 合进配置 dict → `get_environment`（`environments/__init__.py:30-33`）弹出该键并 `importlib` 加载 `MyEnv` → 剩下的 `env`/`timeout` 等 YAML 键作为 kwargs 传给 `LocalEnvironment` 的配置类 → agent 照旧调 `env.execute`。**继承 `LocalEnvironment` 让§4 的三个契约（哨兵、异常包成 returncode -1、serialize 形状）在走 `super()` 的命令上自动保留**；只拦截一个前缀，其余照旧。跑完打开轨迹文件，`info.config.environment_type` 会是 `myenv.MyEnv`（m10 的自描述）——从写类到接线到落盘，整条链路闭合。
+
+想更进一步就换自定义 Model：把 `DeterministicModel`（§5）当模板补齐五个方法，再用 `--model-class` 指过去即可；检查清单在下一节。
+
 ## 八、检查清单与全书收尾
 
 自定义组件上线前对照：

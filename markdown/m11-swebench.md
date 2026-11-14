@@ -28,7 +28,7 @@ mini-extra swebench --subset lite --slice 0:10 -w 4 -m ...
 ├─ 输出目录 + 文件日志                    :217-220
 ├─ load_dataset(subset, split)           :222-226  （DATASET_MAPPING 53-62）
 ├─ filter_instances：正则过滤/切片/洗牌   :228 → :180-197
-├─ 跳过 preds.json 里已完成的 instance    :229-232  ← 断点续跑
+├─ 跳过 preds.json 里已有的一切（含失败）  :229-232  ← 断点续跑
 ├─ 配置合并（YAML + CLI 覆盖）            :235-241
 ├─ RunBatchProgressManager               :243
 └─ Live 进度界面 + ThreadPoolExecutor    :256-271
@@ -124,7 +124,7 @@ if not redo_existing and (output_path / "preds.json").exists():
 | `model_kwargs.parallel_tool_calls` | `true`（183 行） | 鼓励模型一次发多个独立命令 |
 | 提交流程 | `git diff > patch.txt` → 检查 → `echo 哨兵 && cat patch.txt`（77-110 行） | submission 必须是 patch；哨兵与 cat 用 && 连接，cat 失败则返回码非零不提交 |
 
-最后一条与 m07 的哨兵判定严丝合缝：`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt` 的首行是哨兵、余行是 patch、返回码 0——三条件全中，submission 就是 patch 文本。提示词还严禁提交测试文件/辅助脚本/二进制（84-92 行），这些都是评测有效性的护栏。
+最后一条与 m07 的哨兵判定严丝合缝：`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt` 的首行是哨兵、返回码 0——两个判定条件全中，余下的 patch 文本就成了 submission。提示词还严禁提交测试文件/辅助脚本/二进制（84-92 行），这些都是评测有效性的护栏。
 
 ## 八、swebench_single：调试单例的入口
 

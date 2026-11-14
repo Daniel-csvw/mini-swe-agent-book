@@ -152,6 +152,8 @@ Jinja 默认对未定义变量渲染成空字符串；`StrictUndefined` 则直�
 
 ### 6.3 observation_template：截断的艺术
 
+观察模板用的仍是同一套六层变量池，只是多了一个 `output`：agent 在 `execute_actions` 里调用 `format_observation_messages(message, outputs, self.get_template_vars())`（`default.py:157`），把合并结果连同上一步的执行输出一起交给模型类渲染。所以 `{{system}}`、`{{model_cost}}` 在观察模板里同样可用，只是内置模板只取了 `output`。
+
 命令输出可能无限长，模板负责截断。`mini.yaml:112-128`（toolcall 版，JSON 风格）：
 
 ```text

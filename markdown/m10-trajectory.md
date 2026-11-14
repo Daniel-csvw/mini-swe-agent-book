@@ -18,7 +18,7 @@
 | exit_status | 死因标签：Submitted / LimitsExceeded / TimeExceeded / RepeatedFormatError / 异常类名 |
 | submission | 任务产出（SWE-bench 场景就是 git patch 文本） |
 | inspector | `mini-extra inspect`，textual 写的终端轨迹浏览器 |
-| step（inspector 语义） | 一条助手消息 + 紧随其后的观察消息，作为一页展示 |
+| step（inspector 语义） | 一次助手决策开新页，其后归入本页的所有消息（观察、纠错、插话）作为一页展示 |
 
 ## 三、全景：从内存到磁盘再到眼睛
 

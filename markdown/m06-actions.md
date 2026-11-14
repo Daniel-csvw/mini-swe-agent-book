@@ -29,7 +29,7 @@ m01 说过 mini 只有 bash 一个工具。但"模型如何表达要跑命令"�
 | 动作来源 | `message.tool_calls` | 正则匹配 content | `output` 里的 `function_call` 项 |
 | 解析器 | `parse_toolcall_actions` | `parse_regex_actions` | `parse_toolcall_actions_response` |
 | 动作数量 | ≥1，可多个 | **恰好 1 个** | ≥1，可多个 |
-| 观察 role | `tool`（带 tool_call_id） | `user` | `function_call_output`（带 call_id） |
+| 观察消息 | `role="tool"`（带 tool_call_id） | `role="user"` | `type="function_call_output"`（带 call_id，无 role） |
 | 适用模型 | 支持 function calling 的模型 | **任何模型** | 支持 Responses API 的模型 |
 | 配置 | `mini.yaml` | `mini_textbased.yaml` / `default.yaml` | `model_class: litellm_response` |
 

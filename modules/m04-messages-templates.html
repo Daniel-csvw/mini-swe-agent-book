@@ -33,7 +33,7 @@ document.documentElement.dataset.theme=t;})();</script>
   <div class="topbar"><button class="theme-toggle" onclick="toggleTheme()">切换明暗</button></div>
   <div class="content">
 <h1>消息与模板 —— 一切皆 dict，渲染靠 Jinja</h1>
-<p class="meta">约 21 分钟读完</p><blockquote>
+<p class="meta">约 22 分钟读完</p><blockquote>
 <p>本章源文件：<code>src/minisweagent/agents/default.py:52-72</code>、<code>src/minisweagent/utils/serialize.py</code>、<code>src/minisweagent/config/mini.yaml</code>、<code>src/minisweagent/config/default.yaml</code>。</p>
 </blockquote>
 <h2>一、引子：模型看到的第一个字是怎么来的</h2>
@@ -236,6 +236,7 @@ messages 列表（线性历史，只增不减）           default.py:42
 <li>Useful command examples：heredoc 写文件、sed 编辑、<code>nl -ba | sed -n</code> 看行——<strong>把工具用法写进提示词，而不是实现成工具</strong>，这是 m01 支柱一的具体手法。</li>
 </ol>
 <h3>6.3 observation_template：截断的艺术</h3>
+<p>观察模板用的仍是同一套六层变量池，只是多了一个 <code>output</code>：agent 在 <code>execute_actions</code> 里调用 <code>format_observation_messages(message, outputs, self.get_template_vars())</code>（<code>default.py:157</code>），把合并结果连同上一步的执行输出一起交给模型类渲染。所以 <code>{{system}}</code>、<code>{{model_cost}}</code> 在观察模板里同样可用，只是内置模板只取了 <code>output</code>。</p>
 <p>命令输出可能无限长，模板负责截断。<code>mini.yaml:112-128</code>（toolcall 版，JSON 风格）：</p>
 <div class="codehilite"><pre><span></span><code>输出 &lt; 10000 字符：{"returncode": ..., "output": 全量}
 输出 ≥ 10000 字符：{"returncode": ..., "output_head": 前5000, "output_tail": 后5000,
