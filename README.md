@@ -36,7 +36,7 @@
 | # | 章节 | 一句话内容 |
 |---|------|-----------|
 | 01 | [概览 —— 一百行代码，74% 的 SWE-bench](markdown/m01-overview.md) | 成绩单、三根设计支柱与 v1→v2 沿革 |
-| 02 | [包地图 —— 五个核心目录，三个协议](markdown/m02-package-map.md) | 五个核心目录、三个协议、依赖清单与程序入口 |
+| 02 | [包地图 —— 五个核心目录，三个协议](markdown/m02-package-map.md) | 五个核心目录、三个协议，以及一条 `mini` 命令从配置到 `agent.run` 的完整旅程 |
 | 03 | [Agent 循环 —— 异常是唯一的控制流](markdown/m03-agent-loop.md) | run/step/query/execute_actions 逐段精读 |
 | 04 | [消息与模板 —— 一切皆 dict，渲染靠 Jinja](markdown/m04-messages-templates.md) | extra 元数据袋、六层模板变量、观察截断 |
 | 05 | [模型调用 —— 重试、计费与格式错误契约](markdown/m05-model-call.md) | 消息清洗、重试节奏、两级限额、FormatError 契约 |

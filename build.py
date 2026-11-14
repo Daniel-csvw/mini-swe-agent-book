@@ -16,7 +16,7 @@ book_dir = Path(__file__).resolve().parent
 
 CHAPTERS = [
     ("m01-overview", "概览：一百行代码与 74% 的成绩单，三根设计支柱与 v1→v2 沿革。"),
-    ("m02-package-map", "包地图：五个核心目录、三个协议、依赖清单与程序入口。"),
+    ("m02-package-map", "包地图：五个核心目录、三个协议，以及一条 mini 命令从配置到 agent.run 的完整旅程。"),
     ("m03-agent-loop", "Agent 循环：run/step/query/execute_actions，异常是唯一的控制流。"),
     ("m04-messages-templates", "消息与模板：extra 元数据袋、六层模板变量、观察截断的艺术。"),
     ("m05-model-call", "模型调用：消息清洗、重试节奏、两级限额、FormatError 契约。"),
